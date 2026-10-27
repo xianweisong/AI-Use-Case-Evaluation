@@ -450,78 +450,6 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
     </div>
   );
 
-  // --- 6. License Management ---
-  const renderLicenseMgmt = () => (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-bold text-[var(--text-primary)]">授权管理</h2>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {[
-          { type: '虚拟化授权', total: 2, used: 1, unit: '点', icon: Server, color: 'blue' },
-          { type: '云桌面授权', total: 50, used: 32, unit: '点', icon: Monitor, color: 'emerald' },
-          { type: '终端授权', total: 50, used: 45, unit: '点', icon: Smartphone, color: 'orange' },
-        ].map((l, i) => (
-          <div key={i} className="card p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className={cn("p-3 rounded-xl", `bg-${l.color}-50 text-${l.color}-600`)}>
-                <l.icon className="w-6 h-6" />
-              </div>
-              <div className="text-right">
-                <p className="text-[10px] font-bold text-[var(--text-secondary)] uppercase">授权状态</p>
-                <p className="text-xs font-bold text-emerald-500">正常</p>
-              </div>
-            </div>
-            <div>
-              <h4 className="text-sm font-bold text-[var(--text-primary)]">{l.type}</h4>
-              <div className="mt-4 space-y-2">
-                <div className="flex justify-between text-xs">
-                  <span className="text-[var(--text-secondary)]">使用进度</span>
-                  <span className="font-bold text-[var(--text-primary)]">{Math.round((l.used / l.total) * 100)}%</span>
-                </div>
-                <div className="w-full h-2 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
-                  <div className={cn("h-full rounded-full", `bg-${l.color}-500`)} style={{ width: `${(l.used / l.total) * 100}%` }} />
-                </div>
-                <div className="flex justify-between text-[10px] text-[var(--text-secondary)] pt-1">
-                  <span>已用: {l.used} {l.unit}</span>
-                  <span>总计: {l.total} {l.unit}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="card overflow-hidden">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="bg-[var(--bg-primary)] text-[var(--text-secondary)] text-xs uppercase tracking-wider">
-              <th className="px-6 py-4 font-semibold">授权类型</th>
-              <th className="px-6 py-4 font-semibold">授权数量</th>
-              <th className="px-6 py-4 font-semibold">已使用</th>
-              <th className="px-6 py-4 font-semibold">剩余</th>
-              <th className="px-6 py-4 text-right">有效期至</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-[var(--border-color)]">
-            {[
-              { type: '虚拟化授权', total: 2, used: 1, remain: 1, expiry: '2027-12-31' },
-              { type: '物理CPU授权', total: 4, used: 2, remain: 2, expiry: '2027-12-31' },
-              { type: '云桌面授权', total: 50, used: 32, remain: 18, expiry: '2026-12-31' },
-              { type: '终端授权', total: 50, used: 45, remain: 5, expiry: '2026-12-31' },
-            ].map((l, i) => (
-              <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{l.type}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{l.total}</td>
-                <td className="px-6 py-4 text-sm text-blue-600 font-bold">{l.used}</td>
-                <td className="px-6 py-4 text-sm text-emerald-600 font-bold">{l.remain}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{l.expiry}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
 
   // --- 7. Resource Details ---
   const renderResourceDetail = () => (
@@ -635,7 +563,6 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
       case 'v-mgmt': return renderVMgmt();
       case 'cloud-desktop': return renderCloudDesktop();
       case 'terminal': return renderTerminal();
-      case 'license-mgmt': return renderLicenseMgmt();
       default: return renderUserMgmt();
     }
   };
