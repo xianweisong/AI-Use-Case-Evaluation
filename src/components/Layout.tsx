@@ -10,8 +10,7 @@ import {
   ChevronDown,
   Sun,
   Moon,
-  Search,
-  ShieldCheck
+  Search
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { NAV_ITEMS, NavItem } from '../constants';
@@ -70,9 +69,13 @@ export default function Layout({
       >
         {/* Logo Area */}
         <div className="h-16 flex items-center px-6 border-b border-white/5">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shrink-0">
-            <ShieldCheck className="text-white w-5 h-5" />
-          </div>
+          <img
+            src="/h3c-logo.png"
+            alt="H3C"
+            width={1452}
+            height={366}
+            className={cn('h-auto shrink-0', isSidebarOpen ? 'w-12' : 'w-8')}
+          />
           <AnimatePresence>
             {isSidebarOpen && (
               <motion.span
