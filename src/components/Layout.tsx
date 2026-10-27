@@ -81,7 +81,7 @@ export default function Layout({
                 exit={{ opacity: 0, x: -10 }}
                 className="ml-3 font-bold text-white truncate text-sm"
               >
-                AI 场景评测平台
+                公安场景人工智能平台
               </motion.span>
             )}
           </AnimatePresence>
@@ -133,7 +133,17 @@ export default function Layout({
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden pl-9 space-y-1"
                     >
-                      {item.subItems.map((sub) => (
+                      {item.subItems.map((sub) => sub.href ? (
+                        <a
+                          key={sub.id}
+                          href={sub.href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block w-full text-left px-3 py-2 rounded-md text-xs transition-colors text-slate-500 hover:text-white"
+                        >
+                          {sub.label}
+                        </a>
+                      ) : (
                         <button
                           key={sub.id}
                           onClick={() => {
@@ -175,7 +185,7 @@ export default function Layout({
         <header className="h-16 bg-[var(--bg-secondary)] border-b border-[var(--border-color)] flex items-center justify-between px-6 shrink-0 z-40">
           <div className="flex items-center space-x-4">
             <h1 className="text-lg font-semibold text-[var(--text-primary)] hidden md:block">
-              公安人工智能场景评测一体化平台
+              公安场景人工智能平台
             </h1>
             <div className="h-6 w-px bg-[var(--border-color)] hidden md:block" />
             <div className="flex items-center text-sm text-[var(--text-secondary)]">

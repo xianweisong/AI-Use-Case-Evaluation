@@ -29,6 +29,7 @@ export interface NavItem {
 export interface SubNavItem {
   id: string;
   label: string;
+  href?: string;
 }
 
 export const NAV_ITEMS: NavItem[] = [
@@ -101,9 +102,9 @@ export const NAV_ITEMS: NavItem[] = [
     subItems: [
       { id: 'user-mgmt', label: '用户管理' },
       { id: 'perm-mgmt', label: '权限管理' },
-      { id: 'v-mgmt', label: '虚拟化管理' },
-      { id: 'cloud-desktop', label: '云桌面管理' },
-      { id: 'terminal', label: '终端管理' },
+      { id: 'v-mgmt', label: '虚拟化管理', href: 'https://10.13.27.121:40299' },
+      { id: 'cloud-desktop', label: '云桌面管理', href: 'http://10.13.27.26:8083' },
+      { id: 'terminal', label: '终端安全管理', href: 'https://10.13.84.16:443' },
       { id: 'license-mgmt', label: '授权管理' },
     ]
   },

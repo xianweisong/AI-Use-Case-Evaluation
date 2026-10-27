@@ -69,7 +69,7 @@ export default function App() {
     return (
       <ModulePage 
         title={currentSub?.label || currentNav?.label || '模块'} 
-        subtitle={`公安人工智能场景评测一体化平台 - ${currentNav?.label}`}
+        subtitle={`公安场景人工智能平台 - ${currentNav?.label}`}
       />
     );
   };
