@@ -173,8 +173,14 @@ export default function Layout({
 
         {/* Sidebar Footer */}
         <div className="p-4 border-t border-white/5">
+          {isSidebarOpen && (
+            <div className="mb-2 text-center text-xs text-slate-400 whitespace-nowrap">
+              版本 E2026.114
+            </div>
+          )}
           <button 
             onClick={toggleSidebar}
+            title={isSidebarOpen ? '收起侧栏' : '展开侧栏 · 版本 E2026.114'}
             className="w-full flex items-center justify-center p-2 rounded-lg hover:bg-white/5 transition-colors"
           >
             {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
