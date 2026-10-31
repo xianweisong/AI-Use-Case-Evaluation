@@ -1,6 +1,4 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { useNavigationReset } from '../lib/useNavigationReset';
-import { readLocalArray } from '../lib/localEvaluation';
 import { 
   ShieldCheck, 
   Search, 
@@ -78,60 +76,6 @@ interface TestItem {
   description?: string;
 }
 
-// Compare the union of fields, including missing fields and status-only changes.
-export function compareResultItems(results: { items: TestItem[] }[]) {
-  const names = [...new Set(results.flatMap(result => result.items.map(item => item.name)))];
-  return names.map(name => {
-    const items = results.map(result => result.items.find(item => item.name === name));
-    const isDifferent = items.length > 1 && items.some(item =>
-      item?.value !== items[0]?.value || item?.status !== items[0]?.status);
-    const [a, b] = items;
-    const parse = (value: string | number | undefined) => String(value ?? '').match(/^(-?\d+(?:\.\d+)?)\s*(.*)$/);
-    const av = parse(a?.value), bv = parse(b?.value);
-    const numeric = !!a && !!b && !!av && !!bv && av[2] === bv[2];
-    const delta = numeric ? Number((Number(bv![1]) - Number(av![1])).toFixed(6)) : null;
-    const relative = numeric && Number(av![1]) !== 0 ? Math.abs(delta! / Number(av![1])) * 100 : null;
-    return { name, items, isDifferent, numeric, delta, relative,
-      diff: !a || !b ? '测试项缺失' : delta !== null && delta !== 0
-        ? `${delta > 0 ? '+' : ''}${delta}${av![2]}`
-        : a.value !== b.value ? '文本不同' : a.status !== b.status ? '状态不同' : '一致' };
-  });
-}
-
-export function initialComparison<T extends { id: string }>(selected: T, available: T[]) {
-  const other = available.find(result => result.id !== selected.id);
-  return other ? [selected, other] : [selected];
-}
-
-export function parseResultTime(value: string): number {
-  // ISO timestamps with an explicit zone retain their absolute-time semantics.
-  if (/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) return Date.parse(value);
-  const normalized = value.trim().replace(/年|月/g, '-').replace(/日/g, ' ').replace(/：/g, ':');
-  const match = normalized.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T,]+(?:(上午|下午)\s*)?(\d{1,2}):(\d{1,2})(?::(\d{1,2})(?:\.(\d{1,3}))?)?)?$/);
-  if (!match) return NaN;
-  const [, year, month, day, period, hour = '0', minute = '0', second = '0', fraction = '0'] = match;
-  let hours = Number(hour);
-  if (period) { if (hours < 1 || hours > 12) return NaN; hours = hours % 12 + (period === '下午' ? 12 : 0); }
-  const date = new Date(Number(year), Number(month) - 1, Number(day), hours, Number(minute), Number(second), Number(fraction.padEnd(3, '0')));
-  return date.getFullYear() === Number(year) && date.getMonth() === Number(month) - 1 && date.getDate() === Number(day)
-    && date.getHours() === hours && date.getMinutes() === Number(minute) && date.getSeconds() === Number(second) ? date.getTime() : NaN;
-}
-
-export function localReportsToResults(reports: any[]): TestResult[] {
-  return reports.filter(report => report && typeof report.id === 'string' && report.run?.mode === 'local-sample'
-    && Array.isArray(report.run.checks) && report.run.checks.every((check: any) => typeof check.item === 'string' && ['success', 'failed'].includes(check.result))
-    && Number.isFinite(report.run.durationMs)).map(report => {
-      const passed = report.run.checks.filter((check: any) => check.result === 'success').length;
-      const total = report.run.checks.length;
-      return { id: report.id, name: `${report.name}（本地样例）`, type: report.type || '接口测试',
-        taskName: report.taskId || '本地样例', status: passed === total ? 'success' : 'failed', generationTime: report.time || '',
-        duration: `${report.run.durationMs.toFixed(3)}ms`, successRate: total ? Number((passed / total * 100).toFixed(2)) : 0,
-        failureRate: total ? Number(((total - passed) / total * 100).toFixed(2)) : 0, config: '浏览器隔离样例', node: '本地断言（非被测系统）',
-        items: [{ name: '本地断言总耗时', value: `${report.run.durationMs.toFixed(3)}ms`, status: 'success' },
-          ...report.run.checks.map((check: any) => ({ name: check.item, value: check.result === 'success' ? '通过' : check.error || '断言不匹配', status: check.result }))] };
-    });
-}
-
 const getRelativeDate = (daysAgo: number = 0, hoursAgo: number = 0, minsAgo: number = 0) => {
   const d = new Date();
   d.setDate(d.getDate() - daysAgo);
@@ -143,7 +87,7 @@ const getRelativeDate = (daysAgo: number = 0, hoursAgo: number = 0, minsAgo: num
 const MOCK_RESULTS: TestResult[] = [
   {
     id: 'TR-001',
-    name: '示例：人脸识别精度测试_v1.0',
+    name: '人脸识别精度测试_v1.0',
     type: 'UI测试',
     taskName: '人脸识别实时分析任务 #001',
     status: 'success',
@@ -163,7 +107,7 @@ const MOCK_RESULTS: TestResult[] = [
   },
   {
     id: 'TR-002',
-    name: '示例：人脸识别精度测试_v1.1',
+    name: '人脸识别精度测试_v1.1',
     type: 'UI测试',
     taskName: '人脸识别实时分析任务 #001',
     status: 'success',
@@ -183,7 +127,7 @@ const MOCK_RESULTS: TestResult[] = [
   },
   {
     id: 'TR-003',
-    name: '示例：车辆特征提取压力测试',
+    name: '车辆特征提取压力测试',
     type: '性能测试',
     taskName: '车辆特征提取任务 #042',
     status: 'failed',
@@ -204,37 +148,22 @@ const MOCK_RESULTS: TestResult[] = [
 
 export default function ResultVerification({ activeSubTab }: ResultVerificationProps) {
   const [view, setView] = useState<ViewState>('list');
-  useNavigationReset(() => setView(activeSubTab === 'res-comp' ? 'compare' : activeSubTab === 'diff-analysis' ? 'analysis' : 'list'));
   const [selectedResult, setSelectedResult] = useState<TestResult | null>(null);
-  const [compareList, setCompareList] = useState<TestResult[]>(MOCK_RESULTS.slice(0, 2));
+  const [compareList, setCompareList] = useState<TestResult[]>([]);
   const [analysisPair, setAnalysisPair] = useState<[TestResult, TestResult] | null>(null);
-  const [compareMode, setCompareMode] = useState<'horizontal' | 'vertical'>('horizontal');
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [onlyDifferences, setOnlyDifferences] = useState(true);
-  const [itemStatus, setItemStatus] = useState('全部');
-  const [timeRange, setTimeRange] = useState('时间范围');
-  const [localResults, setLocalResults] = useState(() => localReportsToResults(readLocalArray('platform-reports-v1', [])));
-  const availableResults = [...localResults, ...MOCK_RESULTS];
-  useEffect(() => {
-    const reload = () => setLocalResults(localReportsToResults(readLocalArray('platform-reports-v1', [])));
-    window.addEventListener('platform-local-data', reload); window.addEventListener('storage', reload);
-    return () => { window.removeEventListener('platform-local-data', reload); window.removeEventListener('storage', reload); };
-  }, []);
 
   // Filter States
   const [resSearch, setResSearch] = useState('');
   const [resTypeFilter, setResTypeFilter] = useState('测试类型');
 
   const filteredResults = useMemo(() => {
-    return availableResults.filter(res => {
+    return MOCK_RESULTS.filter(res => {
       const matchesSearch = res.name.toLowerCase().includes(resSearch.toLowerCase()) || 
                            res.taskName.toLowerCase().includes(resSearch.toLowerCase());
       const matchesType = resTypeFilter === '测试类型' || res.type === resTypeFilter;
-      const age = Date.now() - parseResultTime(res.generationTime);
-      const matchesTime = timeRange === '时间范围' || (age >= 0 && age <= (timeRange === '最近24小时' ? 1 : 7) * 86400000);
-      return matchesSearch && matchesType && matchesTime;
+      return matchesSearch && matchesType;
     });
-  }, [resSearch, resTypeFilter, timeRange, localResults]);
+  }, [resSearch, resTypeFilter]);
 
   useEffect(() => {
     if (activeSubTab === 'res-list') setView('list');
@@ -299,7 +228,7 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
         </select>
         <div className="flex items-center space-x-2">
           <History className="w-4 h-4 text-[var(--text-secondary)]" />
-          <select value={timeRange} onChange={e => setTimeRange(e.target.value)} className="px-4 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm outline-none">
+          <select className="px-4 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm outline-none">
             <option>时间范围</option>
             <option>最近24小时</option>
             <option>最近7天</option>
@@ -345,14 +274,14 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
                       <Eye className="w-4 h-4" />
                     </button>
                     <button 
-                      onClick={() => { setCompareList(initialComparison(res, availableResults)); setView('compare'); }}
+                      onClick={() => { setCompareList([res]); setView('compare'); }}
                       className="p-1.5 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 text-indigo-500 rounded" 
                       title="对比"
                     >
                       <ArrowRightLeft className="w-4 h-4" />
                     </button>
                     <button 
-                      onClick={() => { setAnalysisPair(initialComparison(res, availableResults) as [TestResult, TestResult]); setView('analysis'); }}
+                      onClick={() => { setAnalysisPair([res, MOCK_RESULTS[0]]); setView('analysis'); }}
                       className="p-1.5 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 text-emerald-500 rounded" 
                       title="分析"
                     >
@@ -386,13 +315,13 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
         </div>
         <div className="flex items-center space-x-3">
           <button 
-            onClick={() => { if (selectedResult) { setCompareList(initialComparison(selectedResult, availableResults)); setView('compare'); } }}
+            onClick={() => { setCompareList([selectedResult!]); setView('compare'); }}
             className="px-4 py-2 border border-[var(--border-color)] rounded-lg text-sm font-medium hover:bg-[var(--bg-secondary)] flex items-center"
           >
             <ArrowRightLeft className="w-4 h-4 mr-2" /> 进入对比
           </button>
           <button 
-            onClick={() => { if (selectedResult) { setAnalysisPair(initialComparison(selectedResult, availableResults) as [TestResult, TestResult]); setView('analysis'); } }}
+            onClick={() => { setAnalysisPair([selectedResult!, MOCK_RESULTS[0]]); setView('analysis'); }}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/20 flex items-center"
           >
             <BarChart3 className="w-4 h-4 mr-2" /> 进入分析
@@ -486,11 +415,10 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
               <h3 className="text-sm font-bold text-[var(--text-secondary)] uppercase">测试项结果</h3>
               <div className="flex items-center space-x-2">
                 <span className="text-xs text-[var(--text-secondary)]">状态筛选:</span>
-                <select value={itemStatus} onChange={e => setItemStatus(e.target.value)} className="text-xs bg-transparent font-bold text-blue-500 outline-none">
+                <select className="text-xs bg-transparent font-bold text-blue-500 outline-none">
                   <option>全部</option>
                   <option>成功</option>
                   <option>失败</option>
-                  <option>警告</option>
                 </select>
               </div>
             </div>
@@ -504,7 +432,7 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border-color)]">
-                  {selectedResult?.items.filter(item => itemStatus === '全部' || item.status === ({ '成功': 'success', '失败': 'failed', '警告': 'warning' }[itemStatus])).map((item, i) => (
+                  {selectedResult?.items.map((item, i) => (
                     <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                       <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}</td>
                       <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{item.value}</td>
@@ -532,8 +460,11 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
 
   // --- 3. Result Comparison Page ---
   const renderCompare = () => {
-    const displayList = compareList;
-    const rows = compareResultItems(displayList).filter(row => !onlyDifferences || row.isDifferent);
+    const [compareMode, setCompareMode] = useState<'horizontal' | 'vertical'>('horizontal');
+    const [showAddModal, setShowAddModal] = useState(false);
+
+    // Ensure we have at least two for comparison in mock
+    const displayList = compareList.length < 2 ? [MOCK_RESULTS[0], MOCK_RESULTS[1]] : compareList;
 
     return (
       <div className="space-y-6">
@@ -573,10 +504,10 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
         </div>
 
         {/* Selection Area / Info Cards */}
-        <div className={cn('grid gap-6', compareMode === 'horizontal' ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3' : 'grid-cols-1')}>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {displayList.map((res, i) => (
             <div key={res.id} className="card p-5 relative group">
-              <button aria-label={`移除 ${res.name}`} onClick={() => setCompareList(prev => prev.filter(item => item.id !== res.id))} className="absolute top-4 right-4 p-1.5 hover:bg-red-50 text-red-500 rounded opacity-0 group-hover:opacity-100 transition-opacity">
+              <button className="absolute top-4 right-4 p-1.5 hover:bg-red-50 text-red-500 rounded opacity-0 group-hover:opacity-100 transition-opacity">
                 <Trash2 className="w-4 h-4" />
               </button>
               <div className="flex items-center mb-4">
@@ -591,7 +522,7 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
               <div className="grid grid-cols-2 gap-4 text-xs">
                 <div>
                   <p className="text-[10px] font-bold text-[var(--text-secondary)] uppercase">测试版本</p>
-                  <p className="font-medium text-[var(--text-primary)]">{res.name.match(/_v(.+)$/)?.[1] ? `v${res.name.match(/_v(.+)$/)![1]}` : '待补充'}</p>
+                  <p className="font-medium text-[var(--text-primary)]">v1.{i}</p>
                 </div>
                 <div>
                   <p className="text-[10px] font-bold text-[var(--text-secondary)] uppercase">成功率</p>
@@ -608,21 +539,15 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
             <h3 className="text-sm font-bold text-[var(--text-secondary)] uppercase">对比明细</h3>
             <div className="flex items-center space-x-4">
               <label className="flex items-center text-xs text-[var(--text-secondary)] cursor-pointer">
-                <input type="checkbox" className="mr-2" checked={onlyDifferences} onChange={e => setOnlyDifferences(e.target.checked)} /> 只看差异项
+                <input type="checkbox" className="mr-2" defaultChecked /> 只看差异项
               </label>
-              <button onClick={() => {
-                const blob = new Blob([JSON.stringify({ results: displayList.map(result => ({ id: result.id, name: result.name })), comparison: compareResultItems(displayList) }, null, 2)], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a'); link.href = url; link.download = '结果对比.json'; link.click();
-                setTimeout(() => URL.revokeObjectURL(url), 1000);
-              }} className="text-xs font-bold text-blue-500 hover:underline flex items-center">
+              <button className="text-xs font-bold text-blue-500 hover:underline flex items-center">
                 <Download className="w-3.5 h-3.5 mr-1" /> 导出对比报告
               </button>
             </div>
           </div>
           <table className="w-full text-left">
             <thead>
-              {compareMode === 'horizontal' ? (
               <tr className="bg-[var(--bg-primary)] text-[var(--text-secondary)] text-[10px] uppercase tracking-wider">
                 <th className="px-6 py-4 font-semibold">测试项</th>
                 {displayList.map((res, i) => (
@@ -630,34 +555,20 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
                 ))}
                 <th className="px-6 py-4 font-semibold text-right">差异分析</th>
               </tr>
-              ) : (
-                <tr className="bg-[var(--bg-primary)] text-[var(--text-secondary)] text-[10px] uppercase tracking-wider">
-                  <th className="px-6 py-4 font-semibold">测试结果</th>
-                  {rows.map(row => <th key={row.name} className="px-6 py-4 font-semibold">{row.name}</th>)}
-                </tr>
-              )}
             </thead>
             <tbody className="divide-y divide-[var(--border-color)]">
-              {compareMode === 'vertical' && rows.length > 0 ? displayList.map((result, resultIndex) => (
-                <tr key={result.id} className="hover:bg-[var(--bg-primary)] transition-colors">
-                  <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{result.name}</td>
-                  {rows.map(row => <td key={row.name} className={cn('px-6 py-4 text-sm font-mono', row.isDifferent && 'bg-red-50/20 dark:bg-red-900/5')}>
-                    {row.items[resultIndex] && getStatusIcon(row.items[resultIndex]!.status)}
-                    {row.items[resultIndex]?.value ?? '-'}
-                  </td>)}
-                </tr>
-              )) : rows.map((row, idx) => {
-                const results = row.items;
-                const isDifferent = row.isDifferent;
+              {displayList[0].items.map((item, idx) => {
+                const results = displayList.map(res => res.items.find(it => it.name === item.name));
+                const isDifferent = results.some(r => r?.value !== results[0]?.value);
                 
                 return (
                   <tr key={idx} className={cn("hover:bg-[var(--bg-primary)] transition-colors", isDifferent && "bg-red-50/20 dark:bg-red-900/5")}>
-                    <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{row.name}</td>
+                    <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}</td>
                     {results.map((res, i) => (
                       <td key={i} className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">
                         <div className="flex items-center">
                           {res && getStatusIcon(res.status)}
-                          <span className="ml-2">{res?.value ?? '-'}</span>
+                          <span className="ml-2">{res?.value || '-'}</span>
                         </div>
                       </td>
                     ))}
@@ -671,22 +582,9 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
                   </tr>
                 );
               })}
-              {rows.length === 0 && <tr><td colSpan={displayList.length + 2} className="px-6 py-12 text-center text-[var(--text-secondary)]">{displayList.length < 2 ? '请添加至少两个对比对象' : '没有匹配的差异项'}</td></tr>}
             </tbody>
           </table>
         </div>
-        {showAddModal && (
-          <div role="dialog" aria-label="添加对比对象" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
-            <div className="card p-6 w-full max-w-lg space-y-4">
-              <h3 className="text-lg font-bold">添加对比对象</h3>
-              {availableResults.filter(result => !displayList.some(item => item.id === result.id)).map(result => (
-                <button key={result.id} className="block w-full text-left p-3 border border-[var(--border-color)] rounded-lg hover:bg-[var(--bg-primary)]" onClick={() => { setCompareList(prev => [...prev, result]); setShowAddModal(false); }}>{result.name}</button>
-              ))}
-              {displayList.length === availableResults.length && <p>已添加全部对比对象</p>}
-              <button onClick={() => setShowAddModal(false)} className="px-4 py-2 border border-[var(--border-color)] rounded-lg">关闭</button>
-            </div>
-          </div>
-        )}
       </div>
     );
   };
@@ -694,24 +592,40 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
   // --- 4. Difference Analysis Page ---
   const renderAnalysis = () => {
     const pair = analysisPair || [MOCK_RESULTS[0], MOCK_RESULTS[1]];
-    const rows = compareResultItems(pair);
-    const differences = rows.filter(row => row.isDifferent);
-    const relativeValues = differences.flatMap(row => row.relative === null ? [] : [row.relative]);
-    const percent = (value: number) => `${Number(value.toFixed(2))}%`;
+    
     const diffStats = [
-      { label: '差异数量', value: String(differences.length), icon: AlertCircle, color: 'red' },
-      { label: '差异率', value: percent(rows.length ? differences.length / rows.length * 100 : 0), icon: TrendingUp, color: 'orange' },
-      { label: '最大差异', value: relativeValues.length ? percent(Math.max(...relativeValues)) : '待补充', icon: Maximize2, color: 'blue' },
-      { label: '平均差异', value: relativeValues.length ? percent(relativeValues.reduce((sum, value) => sum + value, 0) / relativeValues.length) : '待补充', icon: Activity, color: 'emerald' },
+      { label: '差异数量', value: '3', icon: AlertCircle, color: 'red' },
+      { label: '差异率', value: '15.2%', icon: TrendingUp, color: 'orange' },
+      { label: '最大差异', value: '12.5%', icon: Maximize2, color: 'blue' },
+      { label: '平均差异', value: '4.8%', icon: Activity, color: 'emerald' },
     ];
 
     const distributionData = [
-      { name: '数值差异', value: differences.filter(row => row.numeric && row.delta !== 0).length, color: '#3b82f6' },
-      { name: '状态差异', value: differences.filter(row => row.items[0] && row.items[1] && row.items[0].value === row.items[1].value && row.items[0].status !== row.items[1].status).length, color: '#ef4444' },
-      { name: '文本或缺失差异', value: differences.filter(row => !row.items[0] || !row.items[1] || (!row.numeric && row.items[0].value !== row.items[1].value)).length, color: '#f59e0b' },
+      { name: '数值差异', value: 45, color: '#3b82f6' },
+      { name: '状态差异', value: 25, color: '#ef4444' },
+      { name: '文本差异', value: 30, color: '#f59e0b' },
     ];
 
-    const trendData = rows.filter(row => row.relative !== null).map(row => ({ name: row.name, diff: Number(row.relative!.toFixed(2)) }));
+    const getTrendDates = () => {
+      const dates = [];
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        dates.push(`${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+      }
+      return dates;
+    };
+
+    const trendDates = getTrendDates();
+
+    const trendData = [
+      { name: trendDates[0], diff: 12 },
+      { name: trendDates[1], diff: 15 },
+      { name: trendDates[2], diff: 8 },
+      { name: trendDates[3], diff: 18 },
+      { name: trendDates[4], diff: 14 },
+      { name: trendDates[5], diff: 10 },
+    ];
 
     return (
       <div className="space-y-6">
@@ -726,15 +640,15 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
         <div className="card p-4 flex items-center justify-center space-x-12">
           <div className="flex items-center space-x-4">
             <span className="text-xs font-bold text-[var(--text-secondary)] uppercase">测试 A:</span>
-            <select aria-label="测试 A" value={pair[0].id} onChange={e => setAnalysisPair([availableResults.find(result => result.id === e.target.value)!, pair[1]])} className="px-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm outline-none">
-              {availableResults.map(result => <option key={result.id} value={result.id}>{result.name}</option>)}
+            <select className="px-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm outline-none">
+              <option>{pair[0].name}</option>
             </select>
           </div>
           <ArrowRightLeft className="w-5 h-5 text-slate-300" />
           <div className="flex items-center space-x-4">
             <span className="text-xs font-bold text-[var(--text-secondary)] uppercase">测试 B:</span>
-            <select aria-label="测试 B" value={pair[1].id} onChange={e => setAnalysisPair([pair[0], availableResults.find(result => result.id === e.target.value)!])} className="px-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm outline-none">
-              {availableResults.map(result => <option key={result.id} value={result.id}>{result.name}</option>)}
+            <select className="px-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm outline-none">
+              <option>{pair[1].name}</option>
             </select>
           </div>
         </div>
@@ -781,7 +695,7 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
             </div>
           </div>
           <div className="card p-6">
-            <h3 className="text-sm font-bold text-[var(--text-secondary)] uppercase mb-6">各测试项相对差异（%）</h3>
+            <h3 className="text-sm font-bold text-[var(--text-secondary)] uppercase mb-6">差异趋势图</h3>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={trendData}>
@@ -811,22 +725,25 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-color)]">
-              {differences.map((row, i) => (
+              {[
+                { item: '识别准确率', a: '98.5%', b: '99.2%', diff: '+0.7%', type: 'increase' },
+                { item: '平均响应时间', a: '120ms', b: '115ms', diff: '-5ms', type: 'decrease' },
+                { item: '内存占用', a: '4.2GB', b: '4.5GB', diff: '+0.3GB', type: 'increase' },
+              ].map((row, i) => (
                 <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors cursor-pointer group">
-                  <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{row.name}</td>
-                  <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{row.items[0]?.value ?? '-'}</td>
-                  <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{row.items[1]?.value ?? '-'}</td>
+                  <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{row.item}</td>
+                  <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{row.a}</td>
+                  <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{row.b}</td>
                   <td className="px-6 py-4 text-right">
                     <span className={cn(
                       "text-sm font-bold font-mono",
-                      'text-blue-500'
+                      row.type === 'increase' ? 'text-emerald-500' : 'text-blue-500'
                     )}>
                       {row.diff}
                     </span>
                   </td>
                 </tr>
               ))}
-              {differences.length === 0 && <tr><td colSpan={4} className="px-6 py-12 text-center text-[var(--text-secondary)]">没有差异项</td></tr>}
             </tbody>
           </table>
         </div>
@@ -836,10 +753,11 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
 
   const renderContent = () => {
     if (view === 'detail') return renderDetail();
-    switch (view) {
-      case 'list': return renderList();
-      case 'compare': return renderCompare();
-      case 'analysis': return renderAnalysis();
+    
+    switch (activeSubTab) {
+      case 'res-list': return renderList();
+      case 'res-comp': return renderCompare();
+      case 'diff-analysis': return renderAnalysis();
       default: return renderList();
     }
   };
