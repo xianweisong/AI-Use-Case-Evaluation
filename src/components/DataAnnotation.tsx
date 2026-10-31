@@ -63,10 +63,12 @@ const getIndexedDBFile = async (key: string): Promise<any> => {
     const db = await getDB();
     return new Promise((resolve) => {
       const transaction = db.transaction(STORE_NAME, 'readonly');
+      transaction.oncomplete = () => db.close();
+      transaction.onabort = () => { db.close(); resolve(null); };
       const store = transaction.objectStore(STORE_NAME);
       const request = store.get(key);
       request.onsuccess = () => {
-        resolve(request.result);
+        resolve(request.result instanceof Blob ? URL.createObjectURL(request.result) : request.result);
       };
       request.onerror = () => {
         resolve(null);
@@ -85,7 +87,8 @@ const saveIndexedDBFile = async (key: string, value: any): Promise<void> => {
       const transaction = db.transaction(STORE_NAME, 'readwrite');
       const store = transaction.objectStore(STORE_NAME);
       const request = store.put(value, key);
-      request.onsuccess = () => resolve();
+      transaction.oncomplete = () => { db.close(); resolve(); };
+      transaction.onabort = () => { db.close(); reject(transaction.error); };
       request.onerror = () => reject(request.error);
     });
   } catch (err) {
@@ -199,14 +202,84 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     LABELS: 'as-eval-labels'
   };
 
+  const [storageGuard] = useState(() => {
+    const originals = new Map<string, string | null>();
+    const blocked = new Set<string>();
+    for (const key of Object.values(STORAGE_KEYS)) {
+      try { originals.set(key, localStorage.getItem(key)); }
+      catch (error) { console.warn(`Cannot read ${key} from localStorage`, error); blocked.add(key); }
+    }
+    return { originals, blocked, firstValues: new Map<string, string>(), backups: new Set<string>() };
+  });
+
   const getSavedData = <T,>(key: string, defaultValue: T): T => {
     try {
-      const saved = localStorage.getItem(key);
-      return saved ? JSON.parse(saved) : defaultValue;
+      const saved = storageGuard.originals.get(key);
+      if (saved === null || saved === undefined) return defaultValue;
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(defaultValue) && !Array.isArray(parsed)) throw new Error('Expected an array');
+      if (defaultValue === null && (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))) throw new Error('Expected an object');
+      return parsed;
     } catch (e) {
       console.error(`Error loading ${key} from localStorage`, e);
+      storageGuard.blocked.add(key);
       return defaultValue;
     }
+  };
+
+  const saveChangedData = (key: string, value: unknown) => {
+    if (storageGuard.blocked.has(key)) return;
+    let serialized: string;
+    try { serialized = JSON.stringify(value); }
+    catch (error) {
+      console.warn(`Failed to serialize ${key}`, error);
+      storageGuard.blocked.add(key);
+      showAlert('本地保存失败', '本次修改未保存，原有数据未被本页覆盖。请刷新后重试。');
+      return;
+    }
+    if (!storageGuard.firstValues.has(key)) {
+      storageGuard.firstValues.set(key, serialized);
+      return;
+    }
+    if (storageGuard.firstValues.get(key) === serialized) return;
+    try {
+      const expected = storageGuard.originals.get(key) ?? null;
+      if (localStorage.getItem(key) !== expected) throw new Error('Local data changed in another tab');
+      if (!storageGuard.backups.has(key)) {
+        const backupKey = `as-eval-original-backup:${encodeURIComponent(key)}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+        const backup = JSON.stringify({ key, value: expected });
+        localStorage.setItem(backupKey, backup);
+        if (localStorage.getItem(backupKey) !== backup) throw new Error('Local data backup failed');
+        storageGuard.backups.add(key);
+      }
+      localStorage.setItem(key, serialized);
+      storageGuard.originals.set(key, serialized);
+      storageGuard.firstValues.set(key, serialized);
+    } catch (error) {
+      console.warn(`Failed to save ${key}; original local data was preserved`, error);
+      storageGuard.blocked.add(key);
+      showAlert('本地保存失败', '本次修改未保存，原有数据未被本页覆盖。请刷新后重试。');
+    }
+  };
+
+  const filesForStorage = (key: string, files: any[]) => {
+    let persisted: any[] = [];
+    try {
+      const raw = storageGuard.originals.get(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) persisted = parsed;
+      }
+    } catch { /* A malformed original key is blocked by getSavedData. */ }
+    return files.map(file => {
+      if (typeof file.url !== 'string' || !file.url.startsWith('blob:')) return file;
+      const original = persisted.find(entry => entry.id === file.id);
+      if (original && Object.prototype.hasOwnProperty.call(original, 'url')) {
+        return { ...file, url: original.url };
+      }
+      const { url, ...rest } = file;
+      return rest;
+    });
   };
 
   // State Definitions with Persistence
@@ -235,7 +308,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
 
   const [imageFiles, setImageFiles] = useState(() => {
     const raw = getSavedData(STORAGE_KEYS.IMAGE_FILES, []);
-    if (raw.length === 0 || raw.some((f: any) => !f.taskId)) {
+    if (storageGuard.originals.get(STORAGE_KEYS.IMAGE_FILES) === null) {
       return [
         { id: 101, taskId: 'IMG-TASK-001', name: 'face_detection_001.jpg', status: 'completed' },
         { id: 102, taskId: 'IMG-TASK-001', name: 'face_detection_002.jpg', status: 'completed' },
@@ -257,7 +330,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
 
   const [videoFiles, setVideoFiles] = useState(() => {
     const raw = getSavedData(STORAGE_KEYS.VIDEO_FILES, []);
-    if (raw.length === 0) {
+    if (storageGuard.originals.get(STORAGE_KEYS.VIDEO_FILES) === null) {
       return [
         { id: 1, taskId: 'VID-TASK-001', name: 'VIDEO_001.mp4', status: 'completed', extractStatus: 'ready', strategy: 'fps', fps: 5, totalFrames: 12 },
         { id: 2, taskId: 'VID-TASK-001', name: 'VIDEO_002.mp4', status: 'pending', extractStatus: 'pending', strategy: null, totalFrames: 0 },
@@ -300,7 +373,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
       ]
     };
     const saved = getSavedData<Record<string, Rect[]> | null>(STORAGE_KEYS.ANNOTATIONS, null);
-    if (!saved || Object.keys(saved).length === 0) {
+    if (!saved) {
       return defaultAnnotations;
     }
     return saved;
@@ -315,47 +388,25 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
 
   // Auto-save Effects with try-catch to prevent QuotaExceededError crashes
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.IMAGE_TASKS, JSON.stringify(imageTasks));
-    } catch (e) {
-      console.warn('Failed to save image tasks to localStorage', e);
-    }
+    saveChangedData(STORAGE_KEYS.IMAGE_TASKS, imageTasks);
   }, [imageTasks]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.VIDEO_TASKS, JSON.stringify(videoTasks));
-    } catch (e) {
-      console.warn('Failed to save video tasks to localStorage', e);
-    }
+    saveChangedData(STORAGE_KEYS.VIDEO_TASKS, videoTasks);
   }, [videoTasks]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.DATASETS, JSON.stringify(datasets));
-    } catch (e) {
-      console.warn('Failed to save datasets to localStorage', e);
-    }
+    saveChangedData(STORAGE_KEYS.DATASETS, datasets);
   }, [datasets]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.EXPORT_HISTORY, JSON.stringify(exportHistory));
-    } catch (e) {
-      console.warn('Failed to save export history to localStorage', e);
-    }
+    saveChangedData(STORAGE_KEYS.EXPORT_HISTORY, exportHistory);
   }, [exportHistory]);
 
   useEffect(() => {
     try {
-      const sanitized = imageFiles.map((f: any) => {
-        if (f.url && f.url.startsWith('data:')) {
-          const { url, ...rest } = f;
-          return rest;
-        }
-        return f;
-      });
-      localStorage.setItem(STORAGE_KEYS.IMAGE_FILES, JSON.stringify(sanitized));
+      const sanitized = filesForStorage(STORAGE_KEYS.IMAGE_FILES, imageFiles);
+      saveChangedData(STORAGE_KEYS.IMAGE_FILES, sanitized);
     } catch (e) {
       console.warn('Failed to save image files to localStorage (possibly due to base64 size limit)', e);
     }
@@ -363,14 +414,8 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
 
   useEffect(() => {
     try {
-      const sanitized = videoFiles.map((f: any) => {
-        if (f.url && f.url.startsWith('data:')) {
-          const { url, ...rest } = f;
-          return rest;
-        }
-        return f;
-      });
-      localStorage.setItem(STORAGE_KEYS.VIDEO_FILES, JSON.stringify(sanitized));
+      const sanitized = filesForStorage(STORAGE_KEYS.VIDEO_FILES, videoFiles);
+      saveChangedData(STORAGE_KEYS.VIDEO_FILES, sanitized);
     } catch (e) {
       console.warn('Failed to save video files to localStorage', e);
     }
@@ -383,7 +428,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
         setImageFiles(prev => {
           Promise.all(
             prev.map(async (f: any) => {
-              if (!f.url) {
+              if (!f.url || (typeof f.url === 'string' && f.url.startsWith('blob:'))) {
                 const savedUrl = await getIndexedDBFile(`file_url_${f.id}`);
                 if (savedUrl) {
                   return { ...f, url: savedUrl };
@@ -403,7 +448,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
         setVideoFiles(prev => {
           Promise.all(
             prev.map(async (f: any) => {
-              if (!f.url) {
+              if (!f.url || (typeof f.url === 'string' && f.url.startsWith('blob:'))) {
                 const savedUrl = await getIndexedDBFile(`file_url_${f.id}`);
                 if (savedUrl) {
                   return { ...f, url: savedUrl };
@@ -428,14 +473,13 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.ANNOTATIONS, JSON.stringify(annotations));
-    } catch (e) {
-      console.warn('Failed to save annotations to localStorage', e);
-    }
+    saveChangedData(STORAGE_KEYS.ANNOTATIONS, annotations);
   }, [annotations]);
 
+  const previousAnnotations = useRef(annotations);
   useEffect(() => {
+    if (previousAnnotations.current === annotations) return;
+    previousAnnotations.current = annotations;
     // Automatically sync image file status based on whether it has annotations
     setImageFiles(prevFiles => {
       let changed = false;
@@ -478,11 +522,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   }, [annotations]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.LABELS, JSON.stringify(labels));
-    } catch (e) {
-      console.warn('Failed to save labels to localStorage', e);
-    }
+    saveChangedData(STORAGE_KEYS.LABELS, labels);
   }, [labels]);
 
   const [datasetModalConfig, setDatasetModalConfig] = useState<{ open: boolean; dataset?: Dataset }>({ open: false });
@@ -733,7 +773,13 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     setCurrentRect(null);
   };
 
+  const previousVideoFileTaskSignature = useRef(JSON.stringify(videoFiles.map(f =>
+    [f.id, f.taskId, f.status, f.extractStatus]
+  )));
   useEffect(() => {
+    const signature = JSON.stringify(videoFiles.map(f => [f.id, f.taskId, f.status, f.extractStatus]));
+    if (previousVideoFileTaskSignature.current === signature) return;
+    previousVideoFileTaskSignature.current = signature;
     // Sync video task status with file statuses
     setVideoTasks(prevTasks => prevTasks.map(task => {
       const taskFiles = videoFiles.filter(f => f.taskId === task.id);
@@ -765,7 +811,13 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     }));
   }, [videoFiles]);
 
+  const previousImageFileTaskSignature = useRef(JSON.stringify(imageFiles.map(f =>
+    [f.id, f.taskId, f.status]
+  )));
   useEffect(() => {
+    const signature = JSON.stringify(imageFiles.map(f => [f.id, f.taskId, f.status]));
+    if (previousImageFileTaskSignature.current === signature) return;
+    previousImageFileTaskSignature.current = signature;
     // Sync image task status with file statuses
     setImageTasks(prevTasks => prevTasks.map(task => {
       const taskFiles = imageFiles.filter(f => f.taskId === task.id);

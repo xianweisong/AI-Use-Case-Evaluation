@@ -151,6 +151,8 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
   const [selectedResult, setSelectedResult] = useState<TestResult | null>(null);
   const [compareList, setCompareList] = useState<TestResult[]>([]);
   const [analysisPair, setAnalysisPair] = useState<[TestResult, TestResult] | null>(null);
+  const [compareMode, setCompareMode] = useState<'horizontal' | 'vertical'>('horizontal');
+  const [showAddModal, setShowAddModal] = useState(false);
 
   // Filter States
   const [resSearch, setResSearch] = useState('');
@@ -460,11 +462,12 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
 
   // --- 3. Result Comparison Page ---
   const renderCompare = () => {
-    const [compareMode, setCompareMode] = useState<'horizontal' | 'vertical'>('horizontal');
-    const [showAddModal, setShowAddModal] = useState(false);
-
     // Ensure we have at least two for comparison in mock
-    const displayList = compareList.length < 2 ? [MOCK_RESULTS[0], MOCK_RESULTS[1]] : compareList;
+    const displayList = compareList.length === 0
+      ? [MOCK_RESULTS[0], MOCK_RESULTS[1]]
+      : compareList.length === 1
+        ? [compareList[0], MOCK_RESULTS.find(res => res.id !== compareList[0].id)!]
+        : compareList;
 
     return (
       <div className="space-y-6">
@@ -753,6 +756,8 @@ export default function ResultVerification({ activeSubTab }: ResultVerificationP
 
   const renderContent = () => {
     if (view === 'detail') return renderDetail();
+    if (view === 'compare') return renderCompare();
+    if (view === 'analysis') return renderAnalysis();
     
     switch (activeSubTab) {
       case 'res-list': return renderList();
