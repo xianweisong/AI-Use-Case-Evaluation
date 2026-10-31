@@ -29,7 +29,7 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { planImageNames, readImageDimensions, validateNamingRule, type NamingRule, type NamingResult } from '../lib/dataProcessing';
 import { createZip, downloadBlob } from '../lib/zip';
-import { loadStoredImages, saveStoredImages } from '../lib/dataProcessingStorage';
+import { changeStoredImages, migrateProcessingSeeds, type StoredImage } from '../lib/dataProcessingStorage';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -52,6 +52,12 @@ interface ImageData {
   file: File;
 }
 
+function imageFromRecord(record: StoredImage, urls: Set<string>): ImageData {
+  const url = URL.createObjectURL(record.file);
+  urls.add(url);
+  return { ...record, url };
+}
+
 export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
   const [view, setView] = useState<ViewState>('list');
   useNavigationReset(() => setView(activeSubTab === 'batch-rename' ? 'naming' : 'list'));
@@ -69,12 +75,9 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
     lifetime.current = new AbortController();
     const controller = lifetime.current;
     let cancelled = false;
-    loadStoredImages().then(records => {
+    migrateProcessingSeeds().then(records => {
       if (cancelled) return;
-      setImages(records.map(record => {
-        const url = URL.createObjectURL(record.file); urls.current.add(url);
-        return { ...record, url };
-      }));
+      setImages(records.map(record => imageFromRecord(record, urls.current)));
     }).catch(error => { if (!cancelled) setStorageError(error instanceof Error ? error.message : '读取本地图片失败'); })
       .finally(() => { if (!cancelled) { locked.current = false; setBusy(false); } });
     return () => { cancelled = true; controller.abort(); };
@@ -139,9 +142,11 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
         } catch { URL.revokeObjectURL(url); errors.push(file.name); }
       }
       try {
-        const next = [...imported, ...images];
-        await saveStoredImages(next, signal);
-        if (!signal.aborted) setImages(next);
+        const records = await changeStoredImages(imported, [], signal);
+        if (!signal.aborted) setImages(previous => {
+          const byId = new Map([...previous, ...imported].map(image => [image.id, image]));
+          return records.map(record => byId.get(record.id) || imageFromRecord(record, urls.current));
+        });
       } catch (error) {
         imported.forEach(image => { URL.revokeObjectURL(image.url); urls.current.delete(image.url); });
         if (!signal.aborted) alert(`图片未保存：${error instanceof Error ? error.message : '本地存储失败'}`);
@@ -166,11 +171,13 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
       if (signal.aborted) return;
       const zip = createZip(entries);
       const byId = new Map(successes.map(result => [result.id, result]));
-      const outputNames = new Set(successes.map(result => result.newName.toLowerCase()));
-      const next = images.filter(image => byId.has(image.id) || !outputNames.has(image.name.toLowerCase())).map(image => byId.has(image.id) ? { ...image, name: byId.get(image.id)!.newName } : image);
-      await saveStoredImages(next, signal);
+      const changed = images.filter(image => byId.has(image.id)).map(image => ({ ...image, name: byId.get(image.id)!.newName }));
+      const records = await changeStoredImages(changed, [], signal);
       if (signal.aborted) return;
-      setImages(next);
+      setImages(previous => {
+        const byId = new Map([...previous, ...changed].map(image => [image.id, image]));
+        return records.map(record => byId.get(record.id) || imageFromRecord(record, urls.current));
+      });
       setResults(previewResults); setArchive(zip); setSelectedIds([]); setView('result');
     } catch (error) { if (!signal.aborted) alert(`命名未完成：${error instanceof Error ? error.message : '无法读取文件或生成 ZIP'}`); }
     finally { if (!signal.aborted) { locked.current = false; setBusy(false); } }
@@ -262,10 +269,12 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
                       const signal = lifetime.current.signal;
                       locked.current = true; setBusy(true);
                       try {
-                        const next = images.filter(image => image.id !== img.id);
-                        await saveStoredImages(next, signal);
+                        const records = await changeStoredImages([], [img.id], signal);
                         if (signal.aborted) return;
-                        setImages(next);
+                        setImages(previous => {
+                          const byId = new Map(previous.map(image => [image.id, image]));
+                          return records.map(record => byId.get(record.id) || imageFromRecord(record, urls.current));
+                        });
                         setSelectedIds(previous => previous.filter(id => id !== img.id));
                         URL.revokeObjectURL(img.url); urls.current.delete(img.url);
                       } catch (error) { if (!signal.aborted) alert(`删除未完成：${error instanceof Error ? error.message : '本地存储失败'}`); }

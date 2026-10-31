@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useNavigationReset } from '../lib/useNavigationReset';
 import { readLocalArray, saveLocalArray, type LocalRun } from '../lib/localEvaluation';
 import { createInterfaceSample, runInterfaceSample, validateInterfaceConfig, compareVersionSamples, matchesInterfaceReport, type InterfaceSampleConfig, type SampleProtocol } from '../lib/interfaceSamples';
+import { migrateSeedArray, createGuardedStorageWriter } from '../lib/seedMigration';
+import { originalInterfaceSamples, type HistoricalInterfaceSample } from '../lib/interfaceSeeds';
 import { 
   Search, 
   Filter, 
@@ -66,7 +68,9 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
   const [isExecuting, setIsExecuting] = useState(false);
   const [versionDiffConfig, setVersionDiffConfig] = useState({ base: 'v1.2.0', target: 'v1.3.0' });
   const [reportModalOpen, setReportModalOpen] = useState(false);
-  const [configs, setConfigs] = useState<InterfaceSampleConfig[]>(() => readLocalArray('platform-interface-configs-v1', [createInterfaceSample()]));
+  const [configLoad] = useState(() => { try { return { data: migrateSeedArray('platform-interface-configs-v1', [createInterfaceSample(), ...originalInterfaceSamples()], 'id', 'restore-original-data-v1'), error: '' }; } catch (error) { return { data: readLocalArray<InterfaceSampleConfig>('platform-interface-configs-v1', []), error: error instanceof Error ? error.message : '接口示例恢复失败' }; } });
+  const [configs, setConfigs] = useState<InterfaceSampleConfig[]>(configLoad.data);
+  const [writeConfigs] = useState(() => { try { return createGuardedStorageWriter(['platform-interface-configs-v1']); } catch { return null; } });
   const [config, setConfig] = useState<InterfaceSampleConfig>(() => readLocalArray('platform-interface-configs-v1', [createInterfaceSample()])[0] || createInterfaceSample());
   const selectedProtocol = config.protocol;
   const setSelectedProtocol = (protocol: string) => setConfig(createInterfaceSample((protocol === 'HTTPS' ? 'HTTP' : protocol) as SampleProtocol));
@@ -75,11 +79,12 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
   const [runConfig, setRunConfig] = useState<InterfaceSampleConfig | null>(null);
   const [runTime, setRunTime] = useState('');
   const saveConfig = () => {
+    if (configLoad.error || !writeConfigs) { alert('本地数据恢复未完成，已暂停保存以保护原始记录'); return; }
     try {
       validateInterfaceConfig(config);
       const next = configs.some(item => item.id === config.id) ? configs.map(item => item.id === config.id ? config : item) : [...configs, config];
-      saveLocalArray('platform-interface-configs-v1', next); setConfigs(next); alert('隔离样例配置已保存在当前浏览器');
-    } catch (error) { alert(error instanceof Error ? error.message : '保存失败'); }
+      writeConfigs('platform-interface-configs-v1', next); setConfigs(next); alert('隔离样例配置已保存在当前浏览器');
+    } catch (error) { alert(error instanceof Error ? error.message : '保存失败，请刷新后重试'); }
   };
   const [isAutoRecognizing, setIsAutoRecognizing] = useState(false);
   
@@ -97,9 +102,10 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
   };
 
   // Mock Data
-  const API_TESTS = configs.map(item => {
+  const API_TESTS = configs.filter(item => !('legacyGroup' in item) || (item as HistoricalInterfaceSample).legacyGroup === 'api').map(item => {
     const report = readLocalArray<any>('platform-reports-v1', []).find(record => matchesInterfaceReport(record, item));
-    return { ...item, url: item.address, status: report ? (report.run.failed ? 'failed' : 'success') : 'none', time: report?.time || '本地样例' };
+    const historical = item as HistoricalInterfaceSample;
+    return { ...item, url: historical.legacyUrl || item.address, status: report ? (report.run.failed ? 'failed' : 'success') : historical.sample ? `legacy-${historical.legacyStatus}` : 'none', time: report?.time || historical.legacyTime || '本地样例', sample: historical.sample };
   });
 
   const filteredAPITests = React.useMemo(() => {
@@ -111,7 +117,7 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
         '失败': 'failed',
         '未执行': 'none'
       };
-      const matchesStatus = apiStatusFilter === '所有状态' || item.status === statusMap[apiStatusFilter];
+      const matchesStatus = apiStatusFilter === '所有状态' || item.status === statusMap[apiStatusFilter] || item.status === `legacy-${statusMap[apiStatusFilter]}`;
       return matchesSearch && matchesStatus;
     });
   }, [apiSearch, apiStatusFilter, configs, run, runConfig, runTime]);
@@ -133,6 +139,7 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
   }, [activeSubTab]);
 
   const getStatusBadge = (status: string) => {
+    if (status.startsWith('legacy-')) return <span className="text-xs px-2 py-1 rounded-full bg-slate-100 text-slate-600">旧版示例：{status.slice(7) === 'success' ? '成功' : status.slice(7) === 'failed' ? '失败' : status.slice(7) === 'running' ? '执行中' : '未执行'}</span>;
     switch (status) {
       case 'success':
       case 'completed':
@@ -232,7 +239,7 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
           <tbody className="divide-y divide-[var(--border-color)]">
             {filteredAPITests.length > 0 ? filteredAPITests.map((item, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors group">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}{item.sample && '（旧版示例）'}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{item.url}</td>
                 <td className="px-6 py-4">{getMethodBadge(item.method)}</td>
                 <td className="px-6 py-4">{getStatusBadge(item.status)}</td>
@@ -248,7 +255,7 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
                     <button onClick={() => openReport(item)} className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 text-[var(--text-secondary)] rounded" title="报告">
                       <FileText className="w-4 h-4" />
                     </button>
-                    <button onClick={() => { if (confirm('删除此本地样例配置？')) { const next = configs.filter(record => record.id !== item.id); try { saveLocalArray('platform-interface-configs-v1', next); setConfigs(next); } catch { alert('保存失败，未删除'); } } }} className="p-1.5 hover:bg-red-50 dark:hover:bg-red-900/20 text-red-500 rounded" title="删除">
+                    <button onClick={() => { if (configLoad.error || !writeConfigs) { alert('本地数据恢复未完成，已暂停删除'); return; } if (confirm('删除此本地样例配置？')) { const next = configs.filter(record => record.id !== item.id); try { writeConfigs('platform-interface-configs-v1', next); setConfigs(next); } catch (error) { alert(error instanceof Error ? error.message : '保存失败，未删除；请刷新后重试'); } } }} className="p-1.5 hover:bg-red-50 dark:hover:bg-red-900/20 text-red-500 rounded" title="删除">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -302,25 +309,24 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--border-color)]">
-            {[
-              { name: '示例：FaceAPI 多版本结构', api: '离线人脸消息样例', versions: 3, status: 'none', time: '预制样例' },
-              { name: '示例：VehicleAPI 升级结构', api: '离线车辆消息样例', versions: 2, status: 'none', time: '预制样例' },
-            ].map((item, i) => (
+            {configs.filter(item => (item as HistoricalInterfaceSample).legacyGroup === 'version').map((item, i) => {
+              const historical = item as HistoricalInterfaceSample;
+              return (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{item.api}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{item.versions} 个版本</td>
-                <td className="px-6 py-4">{getStatusBadge(item.status)}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{item.time}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}（旧版示例）</td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{historical.legacyApi}</td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{historical.legacyVersions} 个版本</td>
+                <td className="px-6 py-4">{getStatusBadge(`legacy-${historical.legacyStatus}`)}</td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{historical.legacyTime}</td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
-                    <button onClick={() => setView('config')} className="text-xs font-medium text-blue-500 hover:text-blue-600">配置</button>
-                    <button onClick={() => startExecution()} className="text-xs font-medium text-emerald-500 hover:text-emerald-600">校验当前样例</button>
-                    <button onClick={() => openReport(config)} className="text-xs font-medium text-slate-500 hover:text-slate-600">报告</button>
+                    <button onClick={() => { setConfig(item); setView('config'); }} className="text-xs font-medium text-blue-500 hover:text-blue-600">配置</button>
+                    <button onClick={() => startExecution(item)} className="text-xs font-medium text-emerald-500 hover:text-emerald-600">校验样例</button>
+                    <button onClick={() => openReport(item)} className="text-xs font-medium text-slate-500 hover:text-slate-600">报告</button>
                   </div>
                 </td>
               </tr>
-            ))}
+            ); })}
           </tbody>
         </table>
       </div>
@@ -328,12 +334,7 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
   );
 
   const renderProtocolList = () => {
-    const protocols = [
-      { name: '示例：HTTPS 消息结构', api: '离线人脸消息', protocol: 'HTTPS', status: 'none', time: '预制样例' },
-      { name: '示例：HTTP 消息结构', api: '离线人脸消息', protocol: 'HTTP', status: 'none', time: '预制样例' },
-      { name: '示例：WebSocket 消息结构', api: '离线视频消息', protocol: 'WS', status: 'none', time: '预制样例' },
-      { name: '示例：gRPC JSON映射结构', api: '离线特征消息', protocol: 'gRPC', status: 'none', time: '预制样例' },
-    ];
+    const protocols = configs.filter(item => (item as HistoricalInterfaceSample).legacyGroup === 'protocol') as HistoricalInterfaceSample[];
 
     const handleAutoRecognize = () => {
       alert(`当前仅根据本地配置读取协议类型：${config.protocol}；未执行协议探测或连接。`);
@@ -378,24 +379,24 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
             <tbody className="divide-y divide-[var(--border-color)]">
               {protocols.map((item, i) => (
                 <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
-                  <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}</td>
-                  <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{item.api}</td>
+                  <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}（旧版示例）</td>
+                  <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{item.legacyApi}</td>
                   <td className="px-6 py-4">
                     <span className={cn(
                       "text-xs font-mono px-2 py-0.5 rounded font-bold",
-                      item.protocol === 'HTTPS' || item.protocol === 'HTTP' ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" :
+                      item.protocol === 'HTTP' ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" :
                       item.protocol === 'WS' ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" :
                       "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400"
                     )}>
-                      {item.protocol}
+                      {item.id === 'legacy-protocol-https' ? 'HTTPS' : item.protocol === 'WS' ? 'WS' : item.protocol}
                     </span>
                   </td>
-                  <td className="px-6 py-4">{getStatusBadge(item.status)}</td>
-                  <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{item.time}</td>
+                  <td className="px-6 py-4">{getStatusBadge(`legacy-${item.legacyStatus}`)}</td>
+                  <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{item.legacyTime}</td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex items-center justify-end space-x-3">
-                      <button onClick={() => { setSelectedProtocol(item.protocol.includes('HTTP') ? 'HTTP' : item.protocol); setView('config'); }} className="text-xs font-medium text-blue-500 hover:text-blue-600">配置</button>
-                      <button onClick={() => startExecution(createInterfaceSample((item.protocol.includes('HTTP') ? 'HTTP' : item.protocol) as SampleProtocol))} className="text-xs font-medium text-emerald-500 hover:text-emerald-600">校验样例</button>
+                      <button onClick={() => { setConfig(item); setView('config'); }} className="text-xs font-medium text-blue-500 hover:text-blue-600">配置</button>
+                      <button onClick={() => startExecution(item)} className="text-xs font-medium text-emerald-500 hover:text-emerald-600">校验样例</button>
                     </div>
                   </td>
                 </tr>
@@ -1109,6 +1110,7 @@ export default function InterfaceEvaluation({ activeSubTab }: InterfaceEvaluatio
 
   return (
     <div className="h-full">
+      {(configLoad.error || !writeConfigs) && <div role="alert" className="card p-3 mb-3 text-sm text-red-600">本地数据恢复未完成，原始记录已保留：{configLoad.error || '浏览器存储不可用'}</div>}
       <AnimatePresence mode="wait">
         <motion.div
           key={`${activeSubTab}-${view}`}

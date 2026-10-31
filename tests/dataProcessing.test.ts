@@ -2,6 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { planImageNames, type NamingRule } from '../src/lib/dataProcessing.ts';
 import { createZip, crc32 } from '../src/lib/zip.ts';
+import { PROCESSING_SEEDS } from '../src/lib/processingSeeds.ts';
+import { readFileSync } from 'node:fs';
+
+test('all six historical image IDs and names have local decodable SVG sources', () => {
+  assert.deepEqual(PROCESSING_SEEDS.map(seed => [seed.id, seed.name]), [
+    ['1', 'IMG_20240101_001.jpg'], ['2', 'IMG_20240101_002.jpg'],
+    ['3', 'IMG_20240101_003.jpg'], ['4', 'IMG_20240101_004.jpg'],
+    ['5', 'IMG_20240101_005.jpg'], ['6', 'IMG_20240101_006.jpg'],
+  ]);
+  for (const seed of PROCESSING_SEEDS) {
+    const svg = readFileSync(new URL(`../public${seed.asset}`, import.meta.url), 'utf8');
+    assert.match(svg, /<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+    assert.match(svg, /<\/svg>/);
+  }
+});
 
 const rule: NamingRule = { prefix: '图片_', suffix: '', startNumber: 1, digits: 3, useTimestamp: false, useOriginalName: false, duplicateHandling: 'rename' };
 test('preserves multi-dot source names, extension and a frozen timestamp', () => {

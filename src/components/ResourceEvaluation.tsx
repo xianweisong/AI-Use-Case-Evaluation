@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigationReset } from '../lib/useNavigationReset';
-import { readLocalArray, saveLocalArray } from '../lib/localEvaluation';
+import { readLocalArray } from '../lib/localEvaluation';
+import { createGuardedStorageWriter } from '../lib/seedMigration';
+import { migrateSeedArray } from '../lib/seedMigration';
 import { 
   Activity, 
   Cpu, 
@@ -108,11 +110,13 @@ export default function ResourceEvaluation({ activeSubTab }: ResourceEvaluationP
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
-  const [historyData, setHistoryData] = useState(() => readLocalArray('platform-resource-history-v1', [
-    { name: '示例：人脸识别实时分析任务 #001', node: '服务器', cpu: '32%', mem: '45%', gpu: '28%', duration: '02:45:12', frameDrop: '0.42%', time: getFormattedDate(120) },
-    { name: '示例：车辆特征提取任务 #042', node: '本机', cpu: '18%', mem: '32%', gpu: '12%', duration: '01:12:05', frameDrop: '0.15%', time: getFormattedDate(240) },
-    { name: '示例：视频结构化处理任务 #108', node: '服务器', cpu: '54%', mem: '68%', gpu: '72%', duration: '05:20:44', frameDrop: '1.24%', time: getFormattedDate(1440) },
-  ]));
+  const [historyLoad] = useState(() => { try { return { data: migrateSeedArray('platform-resource-history-v1', [
+    { name: '人脸识别实时分析任务 #001', node: '服务器', cpu: '32%', mem: '45%', gpu: '28%', duration: '02:45:12', frameDrop: '0.42%', time: getFormattedDate(120), sample: true },
+    { name: '车辆特征提取任务 #042', node: '本机', cpu: '18%', mem: '32%', gpu: '12%', duration: '01:12:05', frameDrop: '0.15%', time: getFormattedDate(240), sample: true },
+    { name: '视频结构化处理任务 #108', node: '服务器', cpu: '54%', mem: '68%', gpu: '72%', duration: '05:20:44', frameDrop: '1.24%', time: getFormattedDate(1440), sample: true },
+  ], 'name', 'restore-original-data-v1'), error: '' }; } catch (error) { return { data: readLocalArray<any>('platform-resource-history-v1', []), error: error instanceof Error ? error.message : '资源记录恢复失败' }; } });
+  const [historyData, setHistoryData] = useState(historyLoad.data);
+  const [writeHistory] = useState(() => { try { return createGuardedStorageWriter(['platform-resource-history-v1']); } catch { return null; } });
 
   const filteredHistory = useMemo(() => {
     return historyData.filter(item => {
@@ -456,7 +460,7 @@ export default function ResourceEvaluation({ activeSubTab }: ResourceEvaluationP
           <tbody className="divide-y divide-[var(--border-color)]">
             {filteredHistory.length > 0 ? filteredHistory.map((item, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors group">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{item.name}{item.sample && '（旧版示例）'}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{item.node}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{item.cpu}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{item.mem}</td>
@@ -469,7 +473,7 @@ export default function ResourceEvaluation({ activeSubTab }: ResourceEvaluationP
                     <button onClick={() => { setSelectedTask(item); setView('detail'); }} className="p-1.5 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-blue-500 rounded" title="查看详情">
                       <FileText className="w-4 h-4" />
                     </button>
-                    <button onClick={() => { if (confirm('删除此本地示例记录？')) { const next = historyData.filter(record => record !== item); try { saveLocalArray('platform-resource-history-v1', next); setHistoryData(next); } catch { alert('保存失败，记录未删除'); } } }} className="p-1.5 hover:bg-red-50 dark:hover:bg-red-900/20 text-red-500 rounded" title="删除记录">
+                    <button onClick={() => { if (historyLoad.error || !writeHistory) { alert('本地数据恢复未完成，已暂停删除'); return; } if (confirm('删除此本地示例记录？')) { const next = historyData.filter(record => record !== item); try { writeHistory('platform-resource-history-v1', next); setHistoryData(next); } catch (error) { alert(error instanceof Error ? error.message : '保存失败，记录未删除；请刷新后重试'); } } }} className="p-1.5 hover:bg-red-50 dark:hover:bg-red-900/20 text-red-500 rounded" title="删除记录">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -615,6 +619,7 @@ export default function ResourceEvaluation({ activeSubTab }: ResourceEvaluationP
 
   return (
     <div className="h-full">
+      {(historyLoad.error || !writeHistory) && <div role="alert" className="card p-3 mb-3 text-sm text-red-600">本地数据恢复未完成，原始记录已保留：{historyLoad.error || '浏览器存储不可用'}</div>}
       <AnimatePresence mode="wait">
         <motion.div
           key={`${activeSubTab}-${view}`}

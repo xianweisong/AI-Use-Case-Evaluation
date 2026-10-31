@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
 import { useNavigationReset } from '../lib/useNavigationReset';
 import { createTaskInput, compareSampleResponses, parseTaskConfig } from '../lib/taskConfig';
-import { runLocalEvaluation, readLocalArray, saveLocalArray } from '../lib/localEvaluation';
+import { runLocalEvaluation, readLocalArray } from '../lib/localEvaluation';
 import { exportLocalReports } from '../lib/reportExport';
+import { migrateSeedArray, createGuardedStorageWriter } from '../lib/seedMigration';
+import { originalEvaluationTasks, originalEvaluationReports } from '../lib/evaluationSeeds';
 import { 
   Search, 
   Filter, 
@@ -86,24 +88,17 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   };
 
   // Task State
-  const [tasks, setTasks] = useState<any[]>(() => readLocalArray('platform-tasks-v1', [
-    { id: 'TASK-001', name: '人脸识别精度测试', type: 'UI测试', target: 'FaceSDK-v2.1', status: 'completed', time: getRelativeDate(0, 2, 30), user: '张警官' },
-    { id: 'TASK-002', name: '车辆识别接口压力测试', type: '接口测试', target: 'VehicleAPI-v1.0', status: 'running', time: getRelativeDate(0, 1, 15), user: '李警官' },
-    { id: 'TASK-003', name: '视频流并发处理评测', type: '性能测试', target: 'StreamServer-v3', status: 'failed', time: getRelativeDate(0, 3, 45), user: '王警官' },
-    { id: 'TASK-004', name: '移动端UI兼容性测试', type: 'UI测试', target: 'MobileApp-v1.2', status: 'pending', time: getRelativeDate(0, 0, 15), user: '赵警官' },
-  ].map(t => ({ ...t, name: `示例：${t.name}`, status: 'pending', config: '{}' }))));
+  const [taskLoad] = useState(() => { try { return { data: migrateSeedArray('platform-tasks-v1', originalEvaluationTasks(), 'id', 'restore-original-data-v1'), error: '' }; } catch (error) { return { data: readLocalArray<any>('platform-tasks-v1', []), error: error instanceof Error ? error.message : '任务恢复失败' }; } });
+  const [tasks, setTasks] = useState<any[]>(taskLoad.data);
 
-  const [reports, setReports] = useState<any[]>(() => readLocalArray('platform-reports-v1', [
-    { id: 'REP-001', name: '人脸识别精度测试', type: 'UI测试', result: '通过', time: getRelativeDate(0, 2, 45) },
-    { id: 'REP-002', name: '车辆识别接口压力测试', type: '接口测试', result: '部分失败', time: getRelativeDate(0, 1, 30) },
-    { id: 'REP-003', name: '视频流并发处理评测', type: '性能测试', result: '失败', time: getRelativeDate(0, 3, 0) },
-    { id: 'REP-004', name: '仪表盘组件渲染测试', type: 'UI测试', result: '通过', time: getRelativeDate(0, 0, 45) },
-    { id: 'REP-005', name: '车辆轨迹查询API', type: '接口测试', result: '失败', time: getRelativeDate(0, 1, 15) },
-    { id: 'REP-006', name: '数据库写入性能评测', type: '性能测试', result: '通过', time: getRelativeDate(0, 4, 30) },
-  ].map(r => ({ ...r, name: `示例：${r.name}` }))));
+  const [reportLoad] = useState(() => { try { return { data: migrateSeedArray('platform-reports-v1', originalEvaluationReports(), 'id', 'restore-original-data-v1'), error: '' }; } catch (error) { return { data: readLocalArray<any>('platform-reports-v1', []), error: error instanceof Error ? error.message : '报告恢复失败' }; } });
+  const [reports, setReports] = useState<any[]>(reportLoad.data);
+  const [writeRecords] = useState(() => { try { return createGuardedStorageWriter(['platform-tasks-v1', 'platform-reports-v1']); } catch { return null; } });
+  const taskMounted = React.useRef(false);
+  const reportMounted = React.useRef(false);
 
-  React.useEffect(() => { try { saveLocalArray('platform-tasks-v1', tasks); } catch { alert('任务保存失败：浏览器存储空间不足'); } }, [tasks]);
-  React.useEffect(() => { try { saveLocalArray('platform-reports-v1', reports); } catch { alert('报告保存失败：浏览器存储空间不足'); } }, [reports]);
+  React.useEffect(() => { if (!taskMounted.current) { taskMounted.current = true; return; } if (taskLoad.error || !writeRecords) return; try { writeRecords('platform-tasks-v1', tasks); } catch (error) { alert(error instanceof Error ? error.message : '任务保存失败，请刷新后重试'); } }, [tasks, taskLoad.error, writeRecords]);
+  React.useEffect(() => { if (!reportMounted.current) { reportMounted.current = true; return; } if (reportLoad.error || !writeRecords) return; try { writeRecords('platform-reports-v1', reports); } catch (error) { alert(error instanceof Error ? error.message : '报告保存失败，请刷新后重试'); } }, [reports, reportLoad.error, writeRecords]);
 
   const filteredTasks = React.useMemo(() => {
     return tasks.filter(task => {
@@ -148,6 +143,10 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   }, []);
 
   const getStatusLabel = (status: string) => {
+    if (status.startsWith('legacy-')) {
+      const base = getStatusLabel(status.slice(7));
+      return { ...base, label: `旧版示例：${base.label}`, color: 'bg-slate-100 text-slate-600' };
+    }
     switch (status) {
       case 'pending': return { label: '未开始', color: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400' };
       case 'running': return { label: '运行中', color: 'bg-blue-50 text-blue-600 dark:bg-blue-900/20 dark:text-blue-400' };
@@ -167,8 +166,10 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   };
 
   const handleRunTask = (id: string) => {
+    if (taskLoad.error || reportLoad.error || !writeRecords) { alert('本地数据恢复未完成，已暂停执行和保存'); return; }
     const task = tasks.find(t => t.id === id);
     if (!task) return;
+    if (!['UI测试', '接口测试', '性能测试'].includes(task.type)) { alert('此旧版示例类型尚不支持本地执行'); return; }
     try {
       const run = runLocalEvaluation(task);
       const report = { id: `REP-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, taskId: id, taskRevision: task.revision || 1, taskSnapshot: {type:task.type,target:task.target,config:task.config}, name: '本地样例：' + task.name.replace(/^示例：/, ''), type: task.type, result: run.failed ? '失败' : '通过', time: new Date().toLocaleString(), run };
@@ -185,17 +186,20 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   };
 
   const handleDeleteTask = (id: string) => {
+    if (taskLoad.error || !writeRecords) { alert('本地数据恢复未完成，已暂停删除'); return; }
     if (confirm('确定要删除该测试任务吗？')) {
       setTasks(prev => prev.filter(t => t.id !== id));
     }
   };
 
   const handleAddTask = (newTask: any) => {
+    if (taskLoad.error || !writeRecords) { alert('本地数据恢复未完成，已暂停保存'); return; }
     setTasks(prev => [newTask, ...prev]);
     setTaskModalConfig({ open: false });
   };
 
   const handleUpdateTask = (updatedTask: any) => {
+    if (taskLoad.error || !writeRecords) { alert('本地数据恢复未完成，已暂停保存'); return; }
     setTasks(prev => prev.map(t => {
       if (t.id !== updatedTask.id) return t;
       const changed = ['type', 'target', 'config'].some(key => t[key] !== updatedTask[key]);
@@ -583,10 +587,10 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             {filteredTasks.length > 0 ? filteredTasks.map((task) => (
               <tr key={task.id} className="hover:bg-[var(--bg-primary)] transition-colors group">
                 <td className="px-6 py-4 text-sm font-mono text-[var(--text-secondary)]">{task.id}</td>
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{task.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{task.name}{task.sample && <span className="ml-2 text-xs text-slate-500">旧版示例</span>}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.type}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.target}</td>
-                <td className="px-6 py-4"><StatusBadge status={task.status} /></td>
+                <td className="px-6 py-4"><StatusBadge status={task.sample ? `legacy-${task.status}` : task.status} /></td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.time}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.user}</td>
                 <td className="px-6 py-4 text-right">
@@ -677,7 +681,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             {filteredReports.length > 0 ? filteredReports.map((rep) => (
               <tr key={rep.id} className="hover:bg-[var(--bg-primary)] transition-colors">
                 <td className="px-6 py-4 text-sm font-mono text-[var(--text-secondary)]">{rep.id}</td>
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{rep.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{rep.name}{rep.sample && <span className="ml-2 text-xs text-slate-500">旧版示例</span>}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{rep.type}</td>
                 <td className="px-6 py-4">
                   <span className={cn(
@@ -731,9 +735,9 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
           <tbody className="divide-y divide-[var(--border-color)]">
             {tasks.filter(t => t.type === 'UI测试').map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.target}（隔离样例）</td>
-                <td className="px-6 py-4"><StatusBadge status={test.status} /></td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}{test.sample && '（旧版示例）'}</td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.page || test.target}（隔离样例）</td>
+                <td className="px-6 py-4"><StatusBadge status={test.sample ? `legacy-${test.status}` : test.status} /></td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{test.time}</td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
@@ -790,17 +794,17 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
           <tbody className="divide-y divide-[var(--border-color)]">
             {tasks.filter(t => t.type === '接口测试').map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}{test.sample && '（旧版示例）'}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.target}</td>
                 <td className="px-6 py-4">
                   <span className={cn(
                     "text-[10px] px-1.5 py-0.5 rounded font-bold",
                     test.method === 'POST' ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
                   )}>
-                    本地
+                    {test.method || '本地'}
                   </span>
                 </td>
-                <td className="px-6 py-4"><StatusBadge status={test.status} /></td>
+                <td className="px-6 py-4"><StatusBadge status={test.sample ? `legacy-${test.status}` : test.status} /></td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
                     <button onClick={() => handleRunTask(test.id)} className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
@@ -1016,10 +1020,10 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
           <tbody className="divide-y divide-[var(--border-color)]">
             {tasks.filter(t => t.type === '性能测试').map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}{test.sample && '（旧版示例）'}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{test.target}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">本地单线程</td>
-                <td className="px-6 py-4"><StatusBadge status={test.status} /></td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.concurrency ?? '本地单线程'}</td>
+                <td className="px-6 py-4"><StatusBadge status={test.sample ? `legacy-${test.status}` : test.status} /></td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
                     <button onClick={() => handleRunTask(test.id)} className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
@@ -1064,7 +1068,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">任务名称</p>
-                <p className="text-sm font-medium text-[var(--text-primary)]">{task.name} ({task.id})</p>
+                <p className="text-sm font-medium text-[var(--text-primary)]">{task.name} ({task.id}){task.sample && ' · 旧版示例'}</p>
               </div>
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">测试类型</p>
@@ -1125,7 +1129,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-[var(--text-secondary)]">当前状态</span>
-                <StatusBadge status={task.status} />
+                <StatusBadge status={task.sample ? `legacy-${task.status}` : task.status} />
               </div>
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
@@ -1309,7 +1313,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         <div className="card p-6">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
             <div className="space-y-4">
-              <h3 className="text-xl font-bold">{report.name} 报告 ({report.id})</h3>
+              <h3 className="text-xl font-bold">{report.name} 报告 ({report.id}){report.sample && ' · 旧版示例'}</h3>
               <div className="flex flex-wrap gap-4 text-sm text-[var(--text-secondary)]">
                 <div className="flex items-center"><Clock className="w-4 h-4 mr-1.5" /> {report.time}</div>
                 <div className="flex items-center"><LayoutIcon className="w-4 h-4 mr-1.5" /> {report.type}</div>
@@ -1486,6 +1490,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
 
   return (
     <div className="h-full">
+      {(taskLoad.error || reportLoad.error || !writeRecords) && <div role="alert" className="card p-3 mb-3 text-sm text-red-600">本地数据恢复未完成，已保留现有记录且暂停自动保存：{taskLoad.error || reportLoad.error || '浏览器存储不可用'}</div>}
       <AnimatePresence mode="wait">
         <motion.div
           key={`${activeSubTab}-${view}`}

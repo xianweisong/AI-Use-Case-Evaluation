@@ -39,6 +39,82 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { buildAnnotationEntries, editorSize, selectDatasetImages, createLocalId, restoreLocalSource } from '../lib/annotationExport';
 import { createZip, downloadBlob } from '../lib/zip';
+import { backupLocalValues, createGuardedStorageWriter, migrateSeedArray } from '../lib/seedMigration';
+import { annotationSeedVersion, imageTaskSeeds, videoTaskSeeds, datasetSeeds, exportHistorySeeds, imageFileSeeds, videoFileSeeds, annotationSeeds } from '../lib/annotationSeeds';
+
+const STORAGE_KEYS = {
+  IMAGE_TASKS: 'as-eval-image-tasks', VIDEO_TASKS: 'as-eval-video-tasks',
+  DATASETS: 'as-eval-datasets', EXPORT_HISTORY: 'as-eval-export-history',
+  IMAGE_FILES: 'as-eval-image-files', VIDEO_FILES: 'as-eval-video-files',
+  ANNOTATIONS: 'as-eval-annotations', LABELS: 'as-eval-labels'
+} as const;
+
+const defaultLabels = [
+  { name: '人脸', color: '#3b82f6' }, { name: '车辆', color: '#10b981' },
+  { name: '车牌', color: '#f59e0b' }, { name: '行人', color: '#ef4444' },
+];
+
+function restoreAnnotationCatalog() {
+  const keys = Object.values(STORAGE_KEYS);
+  // Validate every source first. A malformed key or failed backup must never
+  // allow initial React effects to overwrite any original local data.
+  for (const key of keys) {
+    const raw = localStorage.getItem(key);
+    if (raw !== null) {
+      const value = JSON.parse(raw);
+      if ([STORAGE_KEYS.IMAGE_TASKS, STORAGE_KEYS.VIDEO_TASKS, STORAGE_KEYS.DATASETS,
+        STORAGE_KEYS.EXPORT_HISTORY, STORAGE_KEYS.IMAGE_FILES, STORAGE_KEYS.VIDEO_FILES, STORAGE_KEYS.LABELS].includes(key as any) && !Array.isArray(value)) {
+        throw new Error(`${key} 本地记录格式异常`);
+      }
+      if (key === STORAGE_KEYS.ANNOTATIONS && (!value || typeof value !== 'object' || Array.isArray(value))) {
+        throw new Error('标注数据格式异常');
+      }
+    }
+  }
+  backupLocalValues(keys, annotationSeedVersion);
+  const imageTasks = migrateSeedArray(STORAGE_KEYS.IMAGE_TASKS, imageTaskSeeds, 'id', annotationSeedVersion);
+  const videoTasks = migrateSeedArray(STORAGE_KEYS.VIDEO_TASKS, videoTaskSeeds, 'id', annotationSeedVersion);
+  const datasets = migrateSeedArray(STORAGE_KEYS.DATASETS, datasetSeeds, 'id', annotationSeedVersion);
+  const exportHistory = migrateSeedArray(STORAGE_KEYS.EXPORT_HISTORY, exportHistorySeeds, 'id', annotationSeedVersion);
+  const imageFiles = migrateSeedArray(STORAGE_KEYS.IMAGE_FILES, imageFileSeeds, 'id', annotationSeedVersion);
+  const videoFiles = migrateSeedArray(STORAGE_KEYS.VIDEO_FILES, videoFileSeeds, 'id', annotationSeedVersion);
+  const annotationMarker = `platform-data-migration:${annotationSeedVersion}:${encodeURIComponent(STORAGE_KEYS.ANNOTATIONS)}`;
+  const currentAnnotations = localStorage.getItem(STORAGE_KEYS.ANNOTATIONS);
+  const annotations: Record<string, Rect[]> = currentAnnotations === null ? {} : JSON.parse(currentAnnotations);
+  if (!annotations || Array.isArray(annotations) || typeof annotations !== 'object') throw new Error('标注数据格式异常');
+  if (localStorage.getItem(annotationMarker) === null) {
+    for (const [key, value] of Object.entries(annotationSeeds)) {
+      if (!Object.prototype.hasOwnProperty.call(annotations, key)) annotations[key] = value;
+    }
+    localStorage.setItem(STORAGE_KEYS.ANNOTATIONS, JSON.stringify(annotations));
+    localStorage.setItem(annotationMarker, '1');
+  }
+  const labels = localStorage.getItem(STORAGE_KEYS.LABELS);
+  return { writable: true, imageTasks, videoTasks, datasets, exportHistory, imageFiles, videoFiles,
+    annotations, labels: labels === null ? defaultLabels : JSON.parse(labels) };
+}
+
+function loadAnnotationCatalog() {
+  try { return restoreAnnotationCatalog(); }
+  catch (error) {
+    console.error('Annotation catalog restoration stopped; original storage remains untouched where possible:', error);
+    const read = (key: string, fallback: any) => {
+      try {
+        const raw = localStorage.getItem(key);
+        if (raw === null) return fallback;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(fallback)) return Array.isArray(parsed) ? parsed : fallback;
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+      }
+      catch { return fallback; }
+    };
+    return { writable: false,
+      imageTasks: read(STORAGE_KEYS.IMAGE_TASKS, []), videoTasks: read(STORAGE_KEYS.VIDEO_TASKS, []),
+      datasets: read(STORAGE_KEYS.DATASETS, []), exportHistory: read(STORAGE_KEYS.EXPORT_HISTORY, []),
+      imageFiles: read(STORAGE_KEYS.IMAGE_FILES, []), videoFiles: read(STORAGE_KEYS.VIDEO_FILES, []),
+      annotations: read(STORAGE_KEYS.ANNOTATIONS, {}), labels: read(STORAGE_KEYS.LABELS, defaultLabels) };
+  }
+}
 
 const readImageDimensions = (blob: Blob): Promise<{ width: number; height: number }> => new Promise((resolve, reject) => {
   const url = URL.createObjectURL(blob);
@@ -146,6 +222,7 @@ interface Dataset {
   taskIds: string[];
   createdAt: string;
   dataCount: number;
+  demo?: boolean;
 }
 
 interface ExportRecord {
@@ -155,9 +232,23 @@ interface ExportRecord {
   status: 'completed' | 'processing' | 'failed';
   time: string;
   downloadUrl?: string;
+  demo?: boolean;
 }
 
+const legacyExamples: Array<{ id: string | number; name: string }> = [
+  ...imageTaskSeeds, ...videoTaskSeeds, ...datasetSeeds, ...imageFileSeeds, ...videoFileSeeds,
+];
+const exampleTag = (record: { id?: string | number; name?: string; demo?: boolean }) => (record.demo || legacyExamples.some(seed => seed.id === record.id && seed.name === record.name))
+  ? <span className="ml-2 text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded" title="原始示例记录；未提供真实原文件或导出包">示例</span>
+  : null;
+
 export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
+  const [initialCatalog] = useState(loadAnnotationCatalog);
+  const [guardedWrite] = useState(() => {
+    if (!initialCatalog.writable) return null;
+    try { return createGuardedStorageWriter(Object.values(STORAGE_KEYS)); }
+    catch (error) { console.error('Annotation storage guard initialization failed:', error); return null; }
+  });
   const [view, setView] = useState<AnnotationView>('list');
   useNavigationReset(() => setView('list'));
   
@@ -203,6 +294,13 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     });
   };
 
+  const reportSaveError = (area: string, error: unknown) => {
+    console.warn(`Failed to save ${area}:`, error);
+    showAlert('本机保存失败', error instanceof Error && error.message.includes('其他页面已更新')
+      ? `${area}未写入：其他页面已更新本地数据。请刷新页面后重试，避免覆盖其他页面的修改。`
+      : `${area}未能保存。请检查浏览器存储空间，并在刷新前保留原始文件。`);
+  };
+
   const [selectedItem, setSelectedItem] = useState<any>(null);
   const [selectedVideo, setSelectedVideo] = useState<any>(null);
   const [extractModalOpen, setExtractModalOpen] = useState(false);
@@ -214,112 +312,74 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   const [vidSearch, setVidSearch] = useState('');
   const [vidStatusFilter, setVidStatusFilter] = useState('所有状态');
 
-  // Persistence Helpers
-  const STORAGE_KEYS = {
-    IMAGE_TASKS: 'as-eval-image-tasks',
-    VIDEO_TASKS: 'as-eval-video-tasks',
-    DATASETS: 'as-eval-datasets',
-    EXPORT_HISTORY: 'as-eval-export-history',
-    IMAGE_FILES: 'as-eval-image-files',
-    VIDEO_FILES: 'as-eval-video-files',
-    ANNOTATIONS: 'as-eval-annotations',
-    LABELS: 'as-eval-labels'
-  };
-
-  const getSavedData = <T,>(key: string, defaultValue: T): T => {
-    try {
-      const saved = localStorage.getItem(key);
-      return saved ? JSON.parse(saved) : defaultValue;
-    } catch (e) {
-      console.error(`Error loading ${key} from localStorage`, e);
-      return defaultValue;
-    }
-  };
-
   // State Definitions with Persistence
-  const [imageTasks, setImageTasks] = useState<any[]>(() => getSavedData<any[]>(STORAGE_KEYS.IMAGE_TASKS, []));
+  const [imageTasks, setImageTasks] = useState<any[]>(initialCatalog.imageTasks);
 
-  const [videoTasks, setVideoTasks] = useState<any[]>(() => getSavedData<any[]>(STORAGE_KEYS.VIDEO_TASKS, []));
+  const [videoTasks, setVideoTasks] = useState<any[]>(initialCatalog.videoTasks);
 
-  const [datasets, setDatasets] = useState<Dataset[]>(() => getSavedData<Dataset[]>(STORAGE_KEYS.DATASETS, []));
+  const [datasets, setDatasets] = useState<Dataset[]>(initialCatalog.datasets);
 
-  const [exportHistory, setExportHistory] = useState<ExportRecord[]>(() => getSavedData<ExportRecord[]>(STORAGE_KEYS.EXPORT_HISTORY, []));
+  const [exportHistory, setExportHistory] = useState<ExportRecord[]>(initialCatalog.exportHistory);
 
-  const [imageFiles, setImageFiles] = useState<any[]>(() => getSavedData<any[]>(STORAGE_KEYS.IMAGE_FILES, []).filter(file => file.taskId));
-  const [videoFiles, setVideoFiles] = useState<any[]>(() => getSavedData<any[]>(STORAGE_KEYS.VIDEO_FILES, []).filter(file => file.taskId));
+  const [imageFiles, setImageFiles] = useState<any[]>(initialCatalog.imageFiles);
+  const [videoFiles, setVideoFiles] = useState<any[]>(initialCatalog.videoFiles);
   const [restoringSources, setRestoringSources] = useState(true);
-  const [annotations, setAnnotations] = useState<Record<string, Rect[]>>(() => {
-    return getSavedData<Record<string, Rect[]>>(STORAGE_KEYS.ANNOTATIONS, {});
-  });
+  const [annotations, setAnnotations] = useState<Record<string, Rect[]>>(initialCatalog.annotations);
 
-  const [labels, setLabels] = useState(() => getSavedData(STORAGE_KEYS.LABELS, [
-    { name: '人脸', color: '#3b82f6' },
-    { name: '车辆', color: '#10b981' },
-    { name: '车牌', color: '#f59e0b' },
-    { name: '行人', color: '#ef4444' },
-  ]));
+  const [labels, setLabels] = useState(initialCatalog.labels);
 
   // Auto-save Effects with try-catch to prevent QuotaExceededError crashes
   useEffect(() => {
+    if (!guardedWrite) return;
     try {
-      localStorage.setItem(STORAGE_KEYS.IMAGE_TASKS, JSON.stringify(imageTasks));
+      guardedWrite(STORAGE_KEYS.IMAGE_TASKS, imageTasks);
     } catch (e) {
-      console.warn('Failed to save image tasks to localStorage', e);
+      reportSaveError('图片任务', e);
     }
   }, [imageTasks]);
 
   useEffect(() => {
+    if (!guardedWrite) return;
     try {
-      localStorage.setItem(STORAGE_KEYS.VIDEO_TASKS, JSON.stringify(videoTasks));
+      guardedWrite(STORAGE_KEYS.VIDEO_TASKS, videoTasks);
     } catch (e) {
-      console.warn('Failed to save video tasks to localStorage', e);
+      reportSaveError('视频任务', e);
     }
   }, [videoTasks]);
 
   useEffect(() => {
+    if (!guardedWrite) return;
     try {
-      localStorage.setItem(STORAGE_KEYS.DATASETS, JSON.stringify(datasets));
+      guardedWrite(STORAGE_KEYS.DATASETS, datasets);
     } catch (e) {
-      console.warn('Failed to save datasets to localStorage', e);
+      reportSaveError('数据集', e);
     }
   }, [datasets]);
 
   useEffect(() => {
+    if (!guardedWrite) return;
     try {
-      localStorage.setItem(STORAGE_KEYS.EXPORT_HISTORY, JSON.stringify(exportHistory));
+      guardedWrite(STORAGE_KEYS.EXPORT_HISTORY, exportHistory);
     } catch (e) {
-      console.warn('Failed to save export history to localStorage', e);
+      reportSaveError('导出历史', e);
     }
   }, [exportHistory]);
 
   useEffect(() => {
+    if (!guardedWrite) return;
     try {
-      const sanitized = imageFiles.map((f: any) => {
-        if (f.url && (f.url.startsWith('data:') || f.url.startsWith('blob:'))) {
-          const { url, ...rest } = f;
-          return rest;
-        }
-        return f;
-      });
-      localStorage.setItem(STORAGE_KEYS.IMAGE_FILES, JSON.stringify(sanitized));
+      guardedWrite(STORAGE_KEYS.IMAGE_FILES, imageFiles);
     } catch (e) {
-      console.warn('Failed to save image files to localStorage (possibly due to base64 size limit)', e);
-      showAlert('本机保存失败', '图片清单无法保存，刷新后可能丢失。请保留原文件并检查浏览器存储空间。');
+      reportSaveError('图片清单', e);
     }
   }, [imageFiles]);
 
   useEffect(() => {
+    if (!guardedWrite) return;
     try {
-      const sanitized = videoFiles.map((f: any) => {
-        if (f.url && (f.url.startsWith('data:') || f.url.startsWith('blob:'))) {
-          const { url, ...rest } = f;
-          return rest;
-        }
-        return f;
-      });
-      localStorage.setItem(STORAGE_KEYS.VIDEO_FILES, JSON.stringify(sanitized));
+      guardedWrite(STORAGE_KEYS.VIDEO_FILES, videoFiles);
     } catch (e) {
-      console.warn('Failed to save video files to localStorage', e);
+      reportSaveError('视频清单', e);
     }
   }, [videoFiles]);
 
@@ -332,7 +392,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
         const saved = await getIndexedDBFile(`file_url_${file.id}`);
         const { url, temporary } = restoreLocalSource(saved, file.url);
         if (temporary) { if (cancelled) URL.revokeObjectURL(url); else urls.push(url); }
-        return { id: file.id, url };
+        return { id: file.id, url: url ?? file.url };
       }));
       if (!cancelled) update(current => current.map(file => {
         const item = restored.find(item => item.id === file.id);
@@ -345,11 +405,11 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   }, []);
 
   useEffect(() => {
+    if (!guardedWrite) return;
     try {
-      localStorage.setItem(STORAGE_KEYS.ANNOTATIONS, JSON.stringify(annotations));
+      guardedWrite(STORAGE_KEYS.ANNOTATIONS, annotations);
     } catch (e) {
-      console.warn('Failed to save annotations to localStorage', e);
-      showAlert('标注未能保存', '浏览器存储不可用，当前标注尚未持久保存。请先导出备份并检查存储空间。');
+      reportSaveError('标注', e);
     }
   }, [annotations]);
 
@@ -358,6 +418,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     setImageFiles(prevFiles => {
       let changed = false;
       const nextFiles = prevFiles.map(f => {
+        if (!f.taskId || f.demo) return f;
         const hasBoxes = annotations[`img_${f.id}`] && annotations[`img_${f.id}`].length > 0;
         const newStatus = hasBoxes ? 'completed' : 'pending';
         if (f.status !== newStatus) {
@@ -373,6 +434,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     setVideoFiles(prevFiles => {
       let changed = false;
       const nextFiles = prevFiles.map(f => {
+        if (!f.taskId || f.demo) return f;
         let hasAnyBox = false;
         const total = f.totalFrames || 0;
         if (total > 0) {
@@ -396,10 +458,11 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   }, [annotations]);
 
   useEffect(() => {
+    if (!guardedWrite) return;
     try {
-      localStorage.setItem(STORAGE_KEYS.LABELS, JSON.stringify(labels));
+      guardedWrite(STORAGE_KEYS.LABELS, labels);
     } catch (e) {
-      console.warn('Failed to save labels to localStorage', e);
+      reportSaveError('标签', e);
     }
   }, [labels]);
 
@@ -475,7 +538,8 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
       count: t.completed,
       progress: t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0,
       time: t.time,
-      isImage: true
+      isImage: true,
+      demo: t.demo
     }));
     const vidTasks = videoTasks.map((t: any) => ({
       id: t.id,
@@ -485,7 +549,8 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
       count: t.completed,
       progress: t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0,
       time: t.time,
-      isImage: false
+      isImage: false,
+      demo: t.demo
     }));
     return [...imgTasks, ...vidTasks];
   }, [imageTasks, videoTasks]);
@@ -660,6 +725,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   useEffect(() => {
     // Sync video task status with file statuses
     setVideoTasks(prevTasks => prevTasks.map(task => {
+      if (task.demo) return task;
       const taskFiles = videoFiles.filter(f => f.taskId === task.id);
       if (taskFiles.length === 0) return task;
 
@@ -692,8 +758,9 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   useEffect(() => {
     // Sync image task status with file statuses
     setImageTasks(prevTasks => prevTasks.map(task => {
+      if (task.demo) return task;
       const taskFiles = imageFiles.filter(f => f.taskId === task.id);
-      if (taskFiles.length === 0) return { ...task, total: 0, completed: 0, status: 'pending' };
+      if (taskFiles.length === 0) return task;
 
       const total = taskFiles.length;
       const completed = taskFiles.filter(f => f.status === 'completed').length;
@@ -804,7 +871,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
           <tbody className="divide-y divide-[var(--border-color)]">
             {filteredImageTasks.length > 0 ? filteredImageTasks.map((task) => (
               <tr key={task.id} className="hover:bg-[var(--bg-primary)] transition-colors group">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{task.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{task.name}{exampleTag(task)}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{task.id}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.total}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.completed}</td>
@@ -908,7 +975,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
           <tbody className="divide-y divide-[var(--border-color)]">
             {filteredVideoTasks.length > 0 ? filteredVideoTasks.map((task) => (
               <tr key={task.id} className="hover:bg-[var(--bg-primary)] transition-colors">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{task.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{task.name}{exampleTag(task)}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{task.id}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.total}</td>
                 <td className="px-6 py-4">{getVideoStatusBadge(task.extractStatus)}</td>
@@ -985,7 +1052,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
           <tbody className="divide-y divide-[var(--border-color)]">
             {allTasks.length > 0 ? allTasks.map((task) => (
               <tr key={task.id} className="hover:bg-[var(--bg-primary)] transition-colors">
-                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{task.name}</td>
+                <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{task.name}{exampleTag(task)}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.type}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.total}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{task.count}</td>
@@ -1199,7 +1266,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                   <img src={file.url} alt={file.url ? '' : '原文件待导入'} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                 </div>
                 <div className="flex items-center justify-between text-[var(--text-primary)]">
-                  <span className="text-xs truncate font-medium max-w-[120px]">{file.name}</span>
+                  <span className="text-xs truncate font-medium max-w-[120px]">{file.name}{exampleTag(file)}</span>
                   <div className="flex items-center space-x-1">
                     {file.status === 'completed' ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : <div className="w-3.5 h-3.5 rounded-full border border-slate-400" />}
                     <button 
@@ -1828,7 +1895,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
             <tbody className="divide-y divide-[var(--border-color)]">
               {currentTaskFiles.map((file) => (
                 <tr key={file.id} className="hover:bg-[var(--bg-primary)] transition-colors">
-                  <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{file.name}</td>
+                  <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{file.name}{exampleTag(file)}{file.demo && <div className="text-[10px] font-normal text-amber-700">无原视频；抽帧状态为旧版示例</div>}</td>
                   <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">
                     {file.strategy ? (
                       <span className="flex items-center">
@@ -2022,7 +2089,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                         <Database className="w-4 h-4" />
                       </div>
                       <div>
-                        <div className="text-sm font-medium text-[var(--text-primary)]">{ds.name}</div>
+                        <div className="text-sm font-medium text-[var(--text-primary)]">{ds.name}{exampleTag(ds)}</div>
                         <div className="text-[10px] text-[var(--text-secondary)]">ID: {ds.id}</div>
                       </div>
                     </div>
@@ -2838,6 +2905,8 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
 
   return (
     <div className="h-full">
+      {!guardedWrite && <div className="mb-3 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">本机数据备份、恢复或写入保护初始化失败：已停止自动写入，请先检查浏览器存储空间。原记录不会被空清单覆盖。</div>}
+      <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">“示例”记录保留旧版名称、数量和状态，仅供浏览；无真实图片、视频帧或历史导出包时不能据此完成标注或导出。</div>
       <AnimatePresence mode="wait">
         <motion.div
           key={`${activeSubTab}-${view}`}

@@ -1,5 +1,7 @@
 import React from 'react';
 import { readLocalArray } from '../lib/localEvaluation';
+import { migrateSeedArray } from '../lib/seedMigration';
+import { originalEvaluationTasks, originalWorkbenchTasks } from '../lib/evaluationSeeds';
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -73,18 +75,21 @@ interface WorkbenchProps {
 }
 
 export default function Workbench({ navigate }: WorkbenchProps) {
-  const load = () => readLocalArray<any>('platform-tasks-v1', []);
-  const [localTasks, setLocalTasks] = React.useState(load);
+  const [taskLoad] = React.useState(() => { try { return { data: migrateSeedArray<any>('platform-tasks-v1', originalEvaluationTasks(), 'id', 'restore-original-data-v1'), error: '' }; } catch (error) { return { data: readLocalArray<any>('platform-tasks-v1', []), error: error instanceof Error ? error.message : '任务恢复失败' }; } });
+  const [localTasks, setLocalTasks] = React.useState(taskLoad.data);
+  const [recentLoad] = React.useState(() => { try { return { data: migrateSeedArray<any>('platform-workbench-recent-v1', originalWorkbenchTasks(), 'id', 'restore-original-data-v1'), error: '' }; } catch (error) { return { data: readLocalArray<any>('platform-workbench-recent-v1', []), error: error instanceof Error ? error.message : '近期任务恢复失败' }; } });
+  const legacyRecent = recentLoad.data;
+  const migrationError = taskLoad.error || recentLoad.error;
   React.useEffect(() => {
-    const sync = () => setLocalTasks(load());
+    const sync = () => setLocalTasks(readLocalArray<any>('platform-tasks-v1', []));
     window.addEventListener('platform-local-data', sync);
     window.addEventListener('storage', sync);
     return () => { window.removeEventListener('platform-local-data', sync); window.removeEventListener('storage', sync); };
   }, []);
-  const RECENT_TASKS: Task[] = localTasks.map(t => ({ id: t.id, name: t.name, type: t.type, status: t.status, progress: t.progress || 0, creator: t.user || '当前用户', createTime: t.time }));
+  const RECENT_TASKS: (Task & { sample?: boolean })[] = [...legacyRecent, ...localTasks].map(t => ({ id: t.id, name: t.name, type: t.type, status: t.status, progress: t.progress || 0, creator: t.user || '当前用户', createTime: t.time, sample: t.sample || t.name?.startsWith('示例：') }));
   const STATS: SystemStat[] = [
-    { label: '累计评测任务', value: String(localTasks.length), trend: 'stable', change: '' },
-    { label: '当前运行中', value: String(localTasks.filter(t => t.status === 'running').length), trend: 'stable', change: '' },
+    { label: '示例及本地任务', value: String(RECENT_TASKS.length), trend: 'stable', change: '' },
+    { label: '示例及本地运行中', value: String(RECENT_TASKS.filter(t => t.status === 'running').length), trend: 'stable', change: '' },
     { label: '标注数据量', value: String(annotationCount()), trend: 'stable', change: '' },
     { label: '系统健康度', value: '未接入', trend: 'stable', change: '' },
   ];
@@ -111,6 +116,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
 
   return (
     <div className="space-y-6">
+      {migrationError && <div role="alert" className="card p-3 text-sm text-red-600">本地数据恢复未完成，原始记录已保留：{migrationError}</div>}
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {STATS.map((stat, i) => (
@@ -299,7 +305,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
                 <tr key={task.id} className="hover:bg-[var(--bg-primary)] transition-colors">
                   <td className="px-6 py-4">
                     <div className="flex flex-col">
-                      <span className="text-sm font-medium text-[var(--text-primary)]">{task.name}</span>
+                      <span className="text-sm font-medium text-[var(--text-primary)]">{task.name}{task.sample && <span className="ml-2 text-xs text-slate-500">旧版示例</span>}</span>
                       <span className="text-xs text-[var(--text-secondary)]">{task.id}</span>
                     </div>
                   </td>
@@ -310,7 +316,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center">
-                      {task.status === 'running' && <Play className="w-3 h-3 text-blue-500 mr-1.5 animate-pulse" />}
+                      {task.status === 'running' && <Play className={cn("w-3 h-3 text-blue-500 mr-1.5", !task.sample && "animate-pulse")} />}
                       {task.status === 'completed' && <CheckCircle2 className="w-3 h-3 text-emerald-500 mr-1.5" />}
                       {task.status === 'failed' && <AlertCircle className="w-3 h-3 text-red-500 mr-1.5" />}
                       {task.status === 'pending' && <Clock className="w-3 h-3 text-slate-400 mr-1.5" />}
@@ -321,7 +327,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
                         task.status === 'failed' ? "text-red-500" :
                         "text-slate-400"
                       )}>
-                        {task.status === 'running' ? '进行中' :
+                        {task.sample ? '旧版示例：' : ''}{task.status === 'running' ? '进行中' :
                          task.status === 'completed' ? '已完成' :
                          task.status === 'failed' ? '已失败' : '待开始'}
                       </span>
@@ -349,6 +355,10 @@ export default function Workbench({ navigate }: WorkbenchProps) {
                   <td className="px-6 py-4">
                     <button 
                       onClick={() => {
+                        if (task.id === 'T-1023') { navigate('resource', 'perf-stats'); return; }
+                        if (task.id === 'T-1022') { navigate('interface', 'api-compat'); return; }
+                        if (task.id === 'T-1021') { navigate('annotation', 'img-anno'); return; }
+                        if (task.id === 'T-1024') { navigate('evaluation', 'task-mgmt'); return; }
                         sessionStorage.setItem('platform-selected-task', task.id);
                         navigate('evaluation', 'task-mgmt');
                       }}

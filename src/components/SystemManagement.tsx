@@ -30,7 +30,8 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { LOCAL_MODULES, SYSTEM_KEY, initialSystem, readSystem, validateUser, validateRole, renameRole, removeRole, type LocalUser, type LocalRole, type LocalSystem } from '../lib/localSystem';
+import { LOCAL_MODULES, SYSTEM_KEY, initialSystem, readSystem, migrateLegacySystem, validateUser, validateRole, renameRole, removeRole, type LocalUser, type LocalRole, type LocalSystem } from '../lib/localSystem';
+import { createGuardedStorageWriter } from '../lib/seedMigration';
 import { 
   BarChart, 
   Bar, 
@@ -63,6 +64,7 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
   const [userRoleFilter, setUserRoleFilter] = useState('所有角色');
 
   const [storageError, setStorageError] = useState('');
+  const guardedWrite = React.useRef<ReturnType<typeof createGuardedStorageWriter> | null>(null);
   const [system, setSystem] = useState<LocalSystem>(() => {
     try { return readSystem(); } catch { return initialSystem(); }
   });
@@ -74,12 +76,18 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
   const [formError, setFormError] = useState('');
   const [pendingPermissions, setPendingPermissions] = useState(false);
   useEffect(() => {
-    try { readSystem(); } catch (error) { setStorageError(error instanceof Error ? error.message : '无法读取本地数据'); }
+    try {
+      const restored = migrateLegacySystem();
+      guardedWrite.current = createGuardedStorageWriter([SYSTEM_KEY]);
+      setSystem(restored);
+      setSelectedRole(restored.roles[0]?.name || '');
+      setPermissions(restored.roles[0]?.permissions || []);
+    } catch (error) { guardedWrite.current = null; setStorageError(error instanceof Error ? error.message : '无法读取本地数据'); }
   }, []);
   const persist = (next: LocalSystem): boolean => {
-    if (storageError) { alert('本地数据读取异常，请先备份并检查浏览器存储，当前禁止覆盖'); return false; }
-    try { localStorage.setItem(SYSTEM_KEY, JSON.stringify(next)); setSystem(next); return true; }
-    catch { alert('本地保存失败，可能是浏览器禁用存储或空间不足，数据未修改'); return false; }
+    if (storageError || !guardedWrite.current) { alert(storageError || '本地数据尚未准备好，请稍后重试'); return false; }
+    try { guardedWrite.current(SYSTEM_KEY, next); setSystem(next); return true; }
+    catch (error) { alert(error instanceof Error ? error.message : '本地保存失败，数据未修改'); return false; }
   };
   const selectRole = (name: string) => {
     if (pendingPermissions && !confirm('权限修改尚未保存，是否放弃修改？')) return;

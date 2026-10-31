@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600" role="img" aria-label="行人标注示例占位图，非真实原图">
+  <rect width="800" height="600" fill="#e8eef6"/>
+  <rect x="32" y="32" width="736" height="536" rx="22" fill="#f8fafc" stroke="#94a3b8" stroke-width="2" stroke-dasharray="12 8"/>
+  <circle cx="400" cy="196" r="48" fill="#94a3b8"/>
+  <rect x="348" y="251" width="104" height="138" rx="42" fill="#64748b"/>
+  <path d="M354 290l-65 92M446 290l65 92M374 384l-38 103M426 384l38 103" stroke="#64748b" stroke-width="28" stroke-linecap="round"/>
+  <rect x="74" y="56" width="240" height="40" rx="8" fill="#f59e0b"/>
+  <text x="194" y="83" text-anchor="middle" font-size="22" font-family="sans-serif" font-weight="bold" fill="#1e293b">示例占位图 · 非原图</text>
+  <text x="400" y="526" text-anchor="middle" font-size="19" font-family="sans-serif" fill="#475569">用于展示旧版标注记录，实际导出需重新导入原始图片</text>
+</svg>
