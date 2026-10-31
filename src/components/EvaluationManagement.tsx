@@ -28,6 +28,9 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { createModuleStore } from '../lib/platformStorage';
+import { makeReportDocx, makeReportHtml, makeReportLines, parseTaskConfig, taskConcurrency } from '../lib/evaluationWorkflows';
+import { createReportPdf } from '../lib/reportPdf';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { 
@@ -53,10 +56,13 @@ interface EvaluationManagementProps {
 }
 
 type ViewType = 'list' | 'taskDetail' | 'reportDetail' | 'versionDiff';
+type Task = { id: string; name: string; type: string; target: string; status: string; time: string; user: string; config?: string; demoRun?: boolean };
+type Report = { id: string; name: string; type: string; result: string; time: string; taskId?: string; demoRun?: boolean; template?: string; content?: string[]; exportFormat?: string; sourceReportId?: string };
 
 export default function EvaluationManagement({ activeSubTab }: EvaluationManagementProps) {
   const [view, setView] = useState<ViewType>('list');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedPreview, setSelectedPreview] = useState<Report | null>(null);
   const [taskModalConfig, setTaskModalConfig] = useState<{ open: boolean; task?: any; initialType?: string }>({ open: false });
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [generatingReport, setGeneratingReport] = useState(false);
@@ -81,21 +87,25 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   };
 
   // Task State
-  const [tasks, setTasks] = useState([
+  const [taskStore] = useState(() => createModuleStore<Task[]>('as-eval-management-tasks', [
     { id: 'TASK-001', name: '人脸识别精度测试', type: 'UI测试', target: 'FaceSDK-v2.1', status: 'completed', time: getRelativeDate(0, 2, 30), user: '张警官' },
     { id: 'TASK-002', name: '车辆识别接口压力测试', type: '接口测试', target: 'VehicleAPI-v1.0', status: 'running', time: getRelativeDate(0, 1, 15), user: '李警官' },
     { id: 'TASK-003', name: '视频流并发处理评测', type: '性能测试', target: 'StreamServer-v3', status: 'failed', time: getRelativeDate(0, 3, 45), user: '王警官' },
     { id: 'TASK-004', name: '移动端UI兼容性测试', type: 'UI测试', target: 'MobileApp-v1.2', status: 'pending', time: getRelativeDate(0, 0, 15), user: '赵警官' },
-  ]);
+  ], (value): value is Task[] => Array.isArray(value) && value.every(item => item && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.type === 'string')));
+  const [tasks, setTasks] = useState<Task[]>(taskStore.initial);
+  const saveTasks = (next: Task[]) => { try { taskStore.save(next); setTasks(next); return true; } catch (error) { alert(error instanceof Error ? error.message : '任务保存失败'); return false; } };
 
-  const [reports, setReports] = useState([
+  const [reportStore] = useState(() => createModuleStore<Report[]>('as-eval-management-reports', [
     { id: 'REP-001', name: '人脸识别精度测试', type: 'UI测试', result: '通过', time: getRelativeDate(0, 2, 45) },
     { id: 'REP-002', name: '车辆识别接口压力测试', type: '接口测试', result: '部分失败', time: getRelativeDate(0, 1, 30) },
     { id: 'REP-003', name: '视频流并发处理评测', type: '性能测试', result: '失败', time: getRelativeDate(0, 3, 0) },
     { id: 'REP-004', name: '仪表盘组件渲染测试', type: 'UI测试', result: '通过', time: getRelativeDate(0, 0, 45) },
     { id: 'REP-005', name: '车辆轨迹查询API', type: '接口测试', result: '失败', time: getRelativeDate(0, 1, 15) },
     { id: 'REP-006', name: '数据库写入性能评测', type: '性能测试', result: '通过', time: getRelativeDate(0, 4, 30) },
-  ]);
+  ], (value): value is Report[] => Array.isArray(value) && value.every(item => item && typeof item.id === 'string' && typeof item.name === 'string' && typeof item.type === 'string')));
+  const [reports, setReports] = useState<Report[]>(reportStore.initial);
+  const saveReports = (next: Report[]) => { try { reportStore.save(next); setReports(next); return true; } catch (error) { alert(error instanceof Error ? error.message : '报告保存失败'); return false; } };
 
   const filteredTasks = React.useMemo(() => {
     return tasks.filter(task => {
@@ -120,6 +130,15 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   // Reset view when sub-tab changes
   React.useEffect(() => {
     setView('list');
+    try {
+      const raw = sessionStorage.getItem('platform-navigation');
+      if (!raw) return;
+      const intent = JSON.parse(raw);
+      if (intent.tab !== 'evaluation' || intent.subTab !== activeSubTab) return;
+      sessionStorage.removeItem('platform-navigation');
+      if (typeof intent.query === 'string') activeSubTab === 'reports' ? setReportSearch(intent.query) : setTaskSearch(intent.query);
+      if (intent.action === 'create') activeSubTab === 'reports' ? setReportModalOpen(true) : setTaskModalConfig({ open: true, initialType: activeSubTab === 'api-test' ? '接口测试' : activeSubTab === 'perf-test' ? '性能测试' : 'UI测试' });
+    } catch { /* malformed navigation requests do not change existing data */ }
   }, [activeSubTab]);
 
   const getStatusLabel = (status: string) => {
@@ -142,34 +161,45 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   };
 
   const handleRunTask = (id: string) => {
-    setTasks(prev => prev.map(t => {
-      if (t.id === id) {
-        return { ...t, status: t.status === 'running' ? 'completed' : 'running' };
-      }
-      return t;
-    }));
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    if (task.config && !parseTaskConfig(task.config)) { alert('任务配置不是有效 JSON，请先编辑修正。'); return; }
+    alert(`“${task.name}”的配置已检查。当前未连接测试执行器，不能实际运行，任务状态保持不变。`);
   };
 
   const handleDeleteTask = (id: string) => {
     if (confirm('确定要删除该测试任务吗？')) {
-      setTasks(prev => prev.filter(t => t.id !== id));
+      saveTasks(tasks.filter(t => t.id !== id));
     }
   };
 
   const handleAddTask = (newTask: any) => {
-    setTasks(prev => [newTask, ...prev]);
+    if (!saveTasks([newTask, ...tasks])) return;
     setTaskModalConfig({ open: false });
   };
 
   const handleUpdateTask = (updatedTask: any) => {
-    setTasks(prev => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
+    if (!saveTasks(tasks.map(t => t.id === updatedTask.id ? updatedTask : t))) return;
     setTaskModalConfig({ open: false });
   };
+  const showPresetResult = (name: string, type: string, status: string) => { setSelectedPreview({ id: `PRESET-${name}`, name, type, result: status === 'completed' ? '通过' : status === 'failed' ? '失败' : '待补充', time: '', demoRun: true }); setView('reportDetail'); };
+  const runPreset = (name: string, type: string, target: string) => {
+    alert(`“${name}”目前只有预置页面记录；未连接${type}执行器，不能对“${target}”运行实际测试。`);
+  };
+  const runCategorized = (id: string, name: string, type: string, target: string) => tasks.some(t => t.id === id) ? handleRunTask(id) : runPreset(name, type, target);
+  const openCategorizedResult = (id: string, name: string, type: string, status: string) => {
+    const task = tasks.find(t => t.id === id);
+    if (!task) { showPresetResult(name, type, status); return; }
+    const report = reports.find(r => r.taskId === id);
+    setSelectedPreview(null); setSelectedId(report?.id || id); setView(report ? 'reportDetail' : 'taskDetail');
+  };
+  const snapshotLinesFor = (id?: string): string[] | undefined => id === 'REP-001' ? ['成功率：92%', '失败率：8%', '平均耗时：142ms'] : id === 'REP-002' ? ['请求一：状态码 200，响应时间 45ms', '请求二：状态码 200，响应时间 120ms', '请求三：状态码 500，响应时间 2100ms'] : id === 'REP-003' ? ['吞吐量：1240 TPS', '并发用户数：500', '错误率：0.05%'] : undefined;
 
   const ReportModal = ({ onClose }: { onClose: () => void }) => {
     const [template, setTemplate] = useState('detailed');
     const [content, setContent] = useState(['overview', 'stats', 'results', 'problems']);
     const [exportFormat, setExportFormat] = useState('pdf');
+    const [taskId, setTaskId] = useState(tasks[0]?.id || '');
 
     const templates = [
       { id: 'simple', name: '简洁版', desc: '仅包含核心指标和结论' },
@@ -188,11 +218,23 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
     ];
 
     const handleGenerate = () => {
+      const task = tasks.find(t => t.id === taskId);
+      if (!task) { alert('请先选择测试任务'); return; }
+      if (!content.length) { alert('请至少选择一项报告内容'); return; }
       setGeneratingReport(true);
-      setTimeout(() => {
-        setGeneratingReport(false);
-        alert('报告生成成功！');
+      setTimeout(async () => {
+        try {
+        const source = reports.find(r => r.name === task.name && r.type === task.type && ['REP-001', 'REP-002', 'REP-003'].includes(r.id));
+        const report: Report = { id: `REP-${Date.now()}`, taskId: task.id, name: task.name, type: task.type, result: '待补充', time: new Date().toLocaleString(), demoRun: true, template, content, exportFormat, sourceReportId: source?.id };
+        const snapshotLines = snapshotLinesFor(source?.id);
+        const input = { name: task.name, type: task.type, target: task.target, config: task.config || (task.id === 'TASK-001' ? '{"threshold":0.85,"max_iterations":1000,"retry_on_failure":true,"log_level":"DEBUG"}' : undefined), template: templates.find(t => t.id === template)?.name || template, sections: content.map(id => modules.find(m => m.id === id)?.name || id), snapshotLines };
+        const blob = exportFormat === 'pdf' ? await createReportPdf(makeReportLines(input)) : exportFormat === 'word' ? makeReportDocx(input) : new Blob([makeReportHtml(input)], { type: 'text/html;charset=utf-8' });
+        if (!saveReports([report, ...reports])) return;
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a'); link.href = url; link.download = `${task.name.replace(/[\\/:*?"<>|]/g, '_')}-报告.${exportFormat === 'word' ? 'docx' : exportFormat}`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        alert(`已保存报告记录并导出 ${exportFormat.toUpperCase()}；实测结果待补充。`);
         onClose();
+        } catch (error) { alert(error instanceof Error ? error.message : '报告生成失败'); } finally { setGeneratingReport(false); }
       }, 1500);
     };
 
@@ -213,6 +255,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
           </div>
           
           <div className="p-6 space-y-6 max-h-[70vh] overflow-y-auto">
+            <div className="space-y-2"><label className="text-sm font-bold">选择测试任务</label><select value={taskId} onChange={e => setTaskId(e.target.value)} className="w-full px-3 py-2 border border-[var(--border-color)] rounded-lg bg-[var(--bg-primary)]">{tasks.map(t => <option key={t.id} value={t.id}>{t.name} ({t.id})</option>)}</select></div>
             {/* Template Selection */}
             <div className="space-y-3">
               <label className="text-sm font-bold text-[var(--text-primary)]">1. 选择报告模板</label>
@@ -220,7 +263,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                 {templates.map(t => (
                   <button
                     key={t.id}
-                    onClick={() => setTemplate(t.id)}
+                    onClick={() => { setTemplate(t.id); setContent(t.id === 'simple' ? ['overview', 'stats'] : t.id === 'executive' ? ['overview', 'stats', 'problems'] : t.id === 'compatibility' ? ['overview', 'diff', 'impact'] : ['overview', 'stats', 'results', 'problems']); }}
                     className={cn(
                       "p-4 rounded-xl border text-left transition-all",
                       template === t.id 
@@ -298,7 +341,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
               ) : (
                 <>
                   <Zap className="w-4 h-4 mr-2" />
-                  立即生成并导出
+                  生成并导出
                 </>
               )}
             </button>
@@ -331,6 +374,8 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
 
     const handleSubmit = (e: React.FormEvent) => {
       e.preventDefault();
+      if (!parseTaskConfig(formData.config)) { alert('测试配置必须是有效 JSON'); return; }
+      if (!formData.name.trim() || !formData.target.trim()) { alert('请填写任务名称和测试对象'); return; }
       if (isEdit) {
         onUpdate({
           ...config.task,
@@ -339,10 +384,11 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         });
       } else {
         const newTask = {
-          id: `TASK-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
+          id: `TASK-${Date.now()}`,
           name: formData.name,
           type: formData.type,
           target: formData.target,
+          config: formData.config,
           status: 'pending',
           time: new Date().toLocaleString(),
           user: '当前用户'
@@ -505,7 +551,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         )}
       </select>
           <div className="flex items-center space-x-2">
-            <button className="p-2 border border-[var(--border-color)] rounded-lg hover:bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+            <button title="重置筛选" onClick={() => { onSearchChange?.(''); onTypeChange?.(''); onStatusChange?.(''); }} className="p-2 border border-[var(--border-color)] rounded-lg hover:bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
               <Filter className="w-4 h-4" />
             </button>
           </div>
@@ -653,7 +699,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-2">
                     <button 
-                      onClick={() => { setSelectedId(rep.id); setView('reportDetail'); }}
+                      onClick={() => { setSelectedPreview(null); setSelectedId(rep.id); setView('reportDetail'); }}
                       className="flex items-center text-xs font-medium text-blue-500 hover:text-blue-600"
                     >
                       <BarChart3 className="w-3.5 h-3.5 mr-1" /> 查看报告
@@ -692,6 +738,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             {[
               { id: 'REP-001', name: '登录页面自动化测试', page: '/login', status: 'completed', time: '2026-03-01 10:00' },
               { id: 'REP-004', name: '仪表盘组件渲染测试', page: '/dashboard', status: 'running', time: '2026-03-01 11:30' },
+              ...tasks.filter(t => t.type === 'UI测试').map(t => ({ id: t.id, name: t.name, page: t.target, status: t.status, time: t.time })),
             ].map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                 <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
@@ -700,9 +747,9 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{test.time}</td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
-                    <button className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
+                    <button onClick={() => runCategorized(test.id, test.name, 'UI测试', test.page)} className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
                     <button 
-                      onClick={() => { setSelectedId(test.id); setView('reportDetail'); }}
+                      onClick={() => openCategorizedResult(test.id, test.name, 'UI测试', test.status)}
                       className="text-xs font-medium text-slate-500 hover:text-slate-600"
                     >
                       查看结果
@@ -754,6 +801,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             {[
               { id: 'REP-002', name: '人脸特征提取API', url: '/api/v1/face/extract', method: 'POST', status: 'completed' },
               { id: 'REP-005', name: '车辆轨迹查询API', url: '/api/v1/vehicle/track', method: 'GET', status: 'failed' },
+              ...tasks.filter(t => t.type === '接口测试').map(t => ({ id: t.id, name: t.name, url: t.target, method: '待补充', status: t.status })),
             ].map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                 <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
@@ -769,9 +817,9 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                 <td className="px-6 py-4"><StatusBadge status={test.status} /></td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
-                    <button className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
+                    <button onClick={() => runCategorized(test.id, test.name, '接口测试', test.url)} className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
                     <button 
-                      onClick={() => { setSelectedId(test.id); setView('reportDetail'); }}
+                      onClick={() => openCategorizedResult(test.id, test.name, '接口测试', test.status)}
                       className="text-xs font-medium text-slate-500 hover:text-slate-600"
                     >
                       查看结果
@@ -787,6 +835,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   );
 
   const renderVersionDiff = () => {
+    const presetPair = versionDiffConfig.base === 'v1.2.0' && versionDiffConfig.target === 'v1.3.0';
     const diffData = [
       { path: '/api/v1/user/profile', method: 'GET', type: 'modified', impact: 'low', description: '新增 optional 字段: bio' },
       { path: '/api/v1/auth/logout', method: 'POST', type: 'added', impact: 'none', description: '新增登出接口' },
@@ -873,7 +922,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-color)]">
-              {diffData.map((item, i) => (
+              {(presetPair ? diffData : []).map((item, i) => (
                 <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                   <td className="px-6 py-4">
                     <div className="flex items-center">
@@ -918,17 +967,17 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="card p-6 border-l-4 border-red-500">
             <h4 className="text-sm font-semibold mb-2">破坏性变更</h4>
-            <p className="text-3xl font-bold text-red-500">2</p>
+            <p className="text-3xl font-bold text-red-500">{presetPair ? 2 : '待补充'}</p>
             <p className="text-xs text-[var(--text-secondary)] mt-1">需要立即更新客户端代码</p>
           </div>
           <div className="card p-6 border-l-4 border-orange-500">
             <h4 className="text-sm font-semibold mb-2">向后兼容变更</h4>
-            <p className="text-3xl font-bold text-orange-500">1</p>
+            <p className="text-3xl font-bold text-orange-500">{presetPair ? 1 : '待补充'}</p>
             <p className="text-xs text-[var(--text-secondary)] mt-1">建议在下个版本适配</p>
           </div>
           <div className="card p-6 border-l-4 border-emerald-500">
             <h4 className="text-sm font-semibold mb-2">新增功能</h4>
-            <p className="text-3xl font-bold text-emerald-500">1</p>
+            <p className="text-3xl font-bold text-emerald-500">{presetPair ? 1 : '待补充'}</p>
             <p className="text-xs text-[var(--text-secondary)] mt-1">可供新业务使用</p>
           </div>
         </div>
@@ -939,6 +988,8 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <AlertCircle className="w-4 h-4 mr-2 text-blue-500" /> 兼容性建议
           </h4>
           <div className="space-y-4">
+            {!presetPair && <p className="text-sm text-[var(--text-secondary)]">该版本组合暂无对比数据。</p>}
+            {presetPair && <>
             <div className="p-4 bg-red-50 dark:bg-red-900/10 rounded-lg border border-red-100 dark:border-red-900/20">
               <p className="text-sm font-bold text-red-700 dark:text-red-400 mb-1">建议 1: 接口迁移</p>
               <p className="text-xs text-red-600 dark:text-red-300/80">
@@ -946,6 +997,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                 v2 接口提供了更高的性能和更多的导出格式支持。
               </p>
             </div>
+            </>}
             <div className="p-4 bg-orange-50 dark:bg-orange-900/10 rounded-lg border border-orange-100 dark:border-orange-900/20">
               <p className="text-sm font-bold text-orange-700 dark:text-orange-400 mb-1">建议 2: 参数适配</p>
               <p className="text-xs text-orange-600 dark:text-orange-300/80">
@@ -982,17 +1034,18 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             {[
               { id: 'REP-003', name: '高并发视频流接入测试', target: 'StreamGateway-v2', concurrency: 500, status: 'completed' },
               { id: 'REP-006', name: '数据库写入性能评测', target: 'PostgreSQL-Cluster', concurrency: 1000, status: 'running' },
+              ...tasks.filter(t => t.type === '性能测试').map(t => ({ id: t.id, name: t.name, target: t.target, concurrency: taskConcurrency(t.config), status: t.status })),
             ].map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                 <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{test.target}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.concurrency}</td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.concurrency || '待补充'}</td>
                 <td className="px-6 py-4"><StatusBadge status={test.status} /></td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
-                    <button className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
+                    <button onClick={() => runCategorized(test.id, test.name, '性能测试', test.target)} className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
                     <button 
-                      onClick={() => { setSelectedId(test.id); setView('reportDetail'); }}
+                      onClick={() => openCategorizedResult(test.id, test.name, '性能测试', test.status)}
                       className="text-xs font-medium text-slate-500 hover:text-slate-600"
                     >
                       查看结果
@@ -1007,7 +1060,11 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
     </>
   );
 
-  const renderTaskDetail = () => (
+  const renderTaskDetail = () => {
+    const task = tasks.find(t => t.id === selectedId);
+    if (!task) return <div className="card p-6">任务不存在。<button onClick={() => setView('list')}>返回列表</button></div>;
+    const taskReport = reports.find(r => r.taskId === task.id) || reports.find(r => r.name === task.name && r.type === task.type);
+    return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <button 
@@ -1029,27 +1086,27 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">任务名称</p>
-                <p className="text-sm font-medium text-[var(--text-primary)]">人脸识别精度测试 (TASK-001)</p>
+                <p className="text-sm font-medium text-[var(--text-primary)]">{task.name} ({task.id})</p>
               </div>
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">测试类型</p>
                 <div className="flex items-center">
                   <LayoutIcon className="w-3.5 h-3.5 mr-1.5 text-blue-500" />
-                  <p className="text-sm font-medium text-[var(--text-primary)]">UI测试</p>
+                  <p className="text-sm font-medium text-[var(--text-primary)]">{task.type}</p>
                 </div>
               </div>
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">创建时间</p>
                 <div className="flex items-center">
                   <Calendar className="w-3.5 h-3.5 mr-1.5 text-slate-400" />
-                  <p className="text-sm font-medium text-[var(--text-primary)]">{getRelativeDate(0, 1, 0)}</p>
+                  <p className="text-sm font-medium text-[var(--text-primary)]">{task.time}</p>
                 </div>
               </div>
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">创建人</p>
                 <div className="flex items-center">
                   <User className="w-3.5 h-3.5 mr-1.5 text-slate-400" />
-                  <p className="text-sm font-medium text-[var(--text-primary)]">张警官</p>
+                  <p className="text-sm font-medium text-[var(--text-primary)]">{task.user}</p>
                 </div>
               </div>
             </div>
@@ -1064,12 +1121,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
               <div>
                 <p className="text-xs text-[var(--text-secondary)] mb-2">运行参数</p>
                 <div className="bg-[var(--bg-primary)] p-4 rounded-lg font-mono text-xs text-[var(--text-primary)] border border-[var(--border-color)]">
-                  {`{
-  "threshold": 0.85,
-  "max_iterations": 1000,
-  "retry_on_failure": true,
-  "log_level": "DEBUG"
-}`}
+                  <pre className="whitespace-pre-wrap">{task.config || (task.id === 'TASK-001' ? '{\n  "threshold": 0.85,\n  "max_iterations": 1000,\n  "retry_on_failure": true,\n  "log_level": "DEBUG"\n}' : '待补充')}</pre>
                 </div>
               </div>
               <div>
@@ -1077,8 +1129,8 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                 <div className="flex items-center p-3 border border-[var(--border-color)] rounded-lg bg-[var(--bg-primary)]">
                   <Database className="w-5 h-5 text-blue-500 mr-3" />
                   <div>
-                    <p className="text-sm font-medium">Standard_Face_Dataset_2026.zip</p>
-                    <p className="text-xs text-[var(--text-secondary)]">大小: 1.2GB | 包含 50,000 张样本</p>
+                    <p className="text-sm font-medium">{task.id === 'TASK-001' ? 'Standard_Face_Dataset_2026.zip' : '待补充'}</p>
+                    {task.id === 'TASK-001' && <p className="text-xs text-[var(--text-secondary)]">大小: 1.2GB | 包含 50,000 张样本</p>}
                   </div>
                 </div>
               </div>
@@ -1095,20 +1147,20 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-[var(--text-secondary)]">当前状态</span>
-                <StatusBadge status="completed" />
+                <StatusBadge status={task.status} />
               </div>
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
                   <span className="text-[var(--text-secondary)]">执行进度</span>
-                  <span className="font-medium text-blue-500">100%</span>
+                  <span className="font-medium text-blue-500">{task.status === 'completed' ? '100%' : '0%'}</span>
                 </div>
                 <div className="h-2 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500 w-full" />
+                  <div className="h-full bg-blue-500 w-full" style={{ width: task.status === 'completed' ? '100%' : '0%' }} />
                 </div>
               </div>
               <div className="pt-4 border-t border-[var(--border-color)]">
                 <button 
-                  onClick={() => setView('reportDetail')}
+                  onClick={() => { if (taskReport) { setSelectedPreview(null); setSelectedId(taskReport.id); setView('reportDetail'); } else alert('该任务暂无报告；当前未连接测试执行器。'); }}
                   className="w-full py-2 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors flex items-center justify-center"
                 >
                   <BarChart3 className="w-4 h-4 mr-2" /> 查看测试报告
@@ -1122,8 +1174,8 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <div className="flex items-center p-3 bg-[var(--bg-primary)] rounded-lg">
               <Zap className="w-4 h-4 text-orange-500 mr-3" />
               <div>
-                <p className="text-xs font-medium">GPU-Node-04</p>
-                <p className="text-[10px] text-[var(--text-secondary)]">负载: 42% | 温度: 65°C</p>
+                <p className="text-xs font-medium">{task.id === 'TASK-001' ? 'GPU-Node-04' : '待补充'}</p>
+                <p className="text-[10px] text-[var(--text-secondary)]">{task.id === 'TASK-001' ? '负载: 42% | 温度: 65°C' : '暂无节点监测数据'}</p>
               </div>
             </div>
           </div>
@@ -1131,29 +1183,24 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
       </div>
     </div>
   );
+  };
 
   const renderReportDetail = () => {
-    const report = reports.find(r => r.id === selectedId) || reports[0];
+    const report = selectedPreview || reports.find(r => r.id === selectedId);
+    if (!report) return <div className="card p-6">报告不存在。<button onClick={() => setView('list')}>返回列表</button></div>;
     const type = report.type;
+    const snapshotId = report.sourceReportId || report.id;
+    const overviewSnapshot = snapshotId === 'REP-001';
+    const hasTypeSnapshot = (snapshotId === 'REP-001' && type === 'UI测试') || (snapshotId === 'REP-002' && type === '接口测试') || (snapshotId === 'REP-003' && type === '性能测试');
 
-    const pieData = [
+    const pieData = overviewSnapshot ? [
       { name: '成功', value: 92, color: '#10b981' },
       { name: '失败', value: 8, color: '#ef4444' },
-    ];
+    ] : [];
 
-    const getTrendTimes = () => {
-      const times = [];
-      for (let i = 6; i >= 0; i--) {
-        const d = new Date();
-        d.setMinutes(d.getMinutes() - i * 10);
-        times.push(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
-      }
-      return times;
-    };
+    const trendTimes = ['点位1', '点位2', '点位3', '点位4', '点位5', '点位6', '点位7'];
 
-    const trendTimes = getTrendTimes();
-
-    const trendData = [
+    const trendData = overviewSnapshot ? [
       { time: trendTimes[0], timeCost: 120, successRate: 85 },
       { time: trendTimes[1], timeCost: 132, successRate: 88 },
       { time: trendTimes[2], timeCost: 101, successRate: 92 },
@@ -1161,27 +1208,32 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
       { time: trendTimes[4], timeCost: 90, successRate: 95 },
       { time: trendTimes[5], timeCost: 230, successRate: 82 },
       { time: trendTimes[6], timeCost: 210, successRate: 89 },
-    ];
+    ] : [];
 
     const renderUITestReport = () => (
       <div className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {[
+          {(hasTypeSnapshot ? [
             { label: '页面加载耗时', value: '1.2s', status: 'success' },
             { label: '首屏渲染耗时', value: '0.8s', status: 'success' },
             { label: '交互响应耗时', value: '120ms', status: 'success' },
             { label: '资源错误数', value: '0', status: 'success' },
-          ].map((item, i) => (
+          ] : [
+            { label: '页面加载耗时', value: '待补充', status: 'pending' },
+            { label: '首屏渲染耗时', value: '待补充', status: 'pending' },
+            { label: '交互响应耗时', value: '待补充', status: 'pending' },
+            { label: '资源错误数', value: '待补充', status: 'pending' },
+          ]).map((item, i) => (
             <div key={i} className="card p-4">
               <p className="text-xs text-[var(--text-secondary)] mb-1">{item.label}</p>
               <p className="text-lg font-bold text-[var(--text-primary)]">{item.value}</p>
             </div>
           ))}
         </div>
-        <div className="card p-6">
+        <div className="card p-6" title={overviewSnapshot || hasTypeSnapshot ? '原版预置详情，非本次采集' : '该报告尚无独立指标数据'}>
           <h4 className="text-sm font-semibold mb-4">UI 兼容性分析</h4>
           <div className="space-y-4">
-            {['Chrome 120', 'Safari 17', 'Firefox 121', 'Edge 120'].map((browser, i) => (
+            {(hasTypeSnapshot ? ['Chrome 120', 'Safari 17', 'Firefox 121', 'Edge 120'] : []).map((browser, i) => (
               <div key={i} className="flex items-center justify-between p-3 bg-[var(--bg-primary)] rounded-lg">
                 <span className="text-sm">{browser}</span>
                 <span className="text-xs text-emerald-500 font-medium">100% 匹配</span>
@@ -1205,11 +1257,11 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-color)]">
-              {[
+              {(hasTypeSnapshot ? [
                 { path: '/api/v1/user/profile', code: 200, time: '45ms', result: 'PASS' },
                 { path: '/api/v1/auth/login', code: 200, time: '120ms', result: 'PASS' },
                 { path: '/api/v1/data/sync', code: 500, time: '2100ms', result: 'FAIL' },
-              ].map((row, i) => (
+              ] : []).map((row, i) => (
                 <tr key={i} className="text-sm">
                   <td className="px-6 py-3 font-mono">{row.path}</td>
                   <td className="px-6 py-3">{row.code}</td>
@@ -1235,18 +1287,18 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="card p-6">
             <h4 className="text-sm font-semibold mb-4">吞吐量 (TPS)</h4>
-            <p className="text-3xl font-bold text-blue-500">1,240</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-2">峰值: 1,580 TPS</p>
+            <p className="text-3xl font-bold text-blue-500">{hasTypeSnapshot ? '1,240' : '待补充'}</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">{hasTypeSnapshot ? '峰值: 1,580 TPS' : '峰值：待补充'}</p>
           </div>
           <div className="card p-6">
             <h4 className="text-sm font-semibold mb-4">并发用户数</h4>
-            <p className="text-3xl font-bold text-orange-500">500</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-2">稳定运行时间: 2h 15m</p>
+            <p className="text-3xl font-bold text-orange-500">{hasTypeSnapshot ? '500' : '待补充'}</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">{hasTypeSnapshot ? '稳定运行时间: 2h 15m' : '稳定运行时间：待补充'}</p>
           </div>
           <div className="card p-6">
             <h4 className="text-sm font-semibold mb-4">错误率</h4>
-            <p className="text-3xl font-bold text-red-500">0.05%</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-2">超时请求: 12个</p>
+            <p className="text-3xl font-bold text-red-500">{hasTypeSnapshot ? '0.05%' : '待补充'}</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">{hasTypeSnapshot ? '超时请求: 12个' : '超时请求：待补充'}</p>
           </div>
         </div>
       </div>
@@ -1264,7 +1316,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         </div>
 
         {/* Report Summary */}
-        <div className="card p-6">
+        <div className="card p-6" title={overviewSnapshot || hasTypeSnapshot ? '原版预置详情，非本次采集' : '该报告尚无独立指标数据'}>
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
             <div className="space-y-4">
               <h3 className="text-xl font-bold">{report.name} 报告 ({report.id})</h3>
@@ -1282,15 +1334,15 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             </div>
             <div className="flex gap-8">
               <div className="text-center">
-                <p className="text-2xl font-bold text-emerald-500">92%</p>
+                <p className="text-2xl font-bold text-emerald-500">{overviewSnapshot ? '92%' : '待补充'}</p>
                 <p className="text-xs text-[var(--text-secondary)]">成功率</p>
               </div>
               <div className="text-center">
-                <p className="text-2xl font-bold text-red-500">8%</p>
+                <p className="text-2xl font-bold text-red-500">{overviewSnapshot ? '8%' : '待补充'}</p>
                 <p className="text-xs text-[var(--text-secondary)]">失败率</p>
               </div>
               <div className="text-center">
-                <p className="text-2xl font-bold text-blue-500">142ms</p>
+                <p className="text-2xl font-bold text-blue-500">{overviewSnapshot ? '142ms' : '待补充'}</p>
                 <p className="text-xs text-[var(--text-secondary)]">平均耗时</p>
               </div>
             </div>
@@ -1299,7 +1351,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
 
         {/* Charts Section */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="card p-6 lg:col-span-2">
+          <div className="card p-6 lg:col-span-2" title={overviewSnapshot ? '原版预置趋势数据，横轴为静态点位，非本次采集时间' : '暂无独立趋势数据'}>
             <h4 className="text-sm font-semibold mb-6">趋势分析 (耗时 & 成功率)</h4>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
@@ -1373,13 +1425,13 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-color)]">
-              {[
+              {(overviewSnapshot ? [
                 { item: '人脸检测 - 正面', result: 'success', cost: '45ms', error: '-' },
                 { item: '人脸检测 - 侧面', result: 'success', cost: '52ms', error: '-' },
                 { item: '特征点提取', result: 'success', cost: '120ms', error: '-' },
                 { item: '活体检测', result: 'failed', cost: '210ms', error: '光照强度不足' },
                 { item: '人脸比对 (1:1)', result: 'success', cost: '85ms', error: '-' },
-              ].map((row, i) => (
+              ] : []).map((row, i) => (
                 <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                   <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{row.item}</td>
                   <td className="px-6 py-4">

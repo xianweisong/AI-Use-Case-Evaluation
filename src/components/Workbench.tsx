@@ -61,13 +61,11 @@ const RECENT_TASKS: Task[] = [
 const getResourceData = () => {
   const data = [];
   for (let i = 6; i >= 0; i--) {
-    const d = new Date();
-    d.setHours(d.getHours() - i * 4);
     data.push({
-      time: `${String(d.getHours()).padStart(2, '0')}:00`,
-      cpu: Math.floor(Math.random() * 50) + 30,
-      memory: Math.floor(Math.random() * 40) + 40,
-      gpu: Math.floor(Math.random() * 60) + 20,
+      time: ['00:00','04:00','08:00','12:00','16:00','20:00','24:00'][6-i],
+      cpu: [42,50,45,61,56,48,52][6-i],
+      memory: [62,64,68,65,70,66,64][6-i],
+      gpu: [30,40,38,52,48,41,44][6-i],
     });
   }
   return data;
@@ -83,7 +81,7 @@ const QUICK_ENTRIES = [
 ];
 
 interface WorkbenchProps {
-  navigate: (tabId: string, subTabId?: string) => void;
+  navigate: (tabId: string, subTabId?: string, intent?: {action?: string; query?: string; id?: string}) => void;
 }
 
 export default function Workbench({ navigate }: WorkbenchProps) {
@@ -91,9 +89,27 @@ export default function Workbench({ navigate }: WorkbenchProps) {
   const [typeFilter, setTypeFilter] = React.useState('all');
   const [statusFilter, setStatusFilter] = React.useState('all');
   const [creatorFilter, setCreatorFilter] = React.useState('');
+  const [detailTask, setDetailTask] = React.useState<Task | null>(null);
+  const readRecentTasks = (): Task[] => {
+    try {
+      const records = JSON.parse(localStorage.getItem('as-eval-management-tasks') || '[]');
+      if (!Array.isArray(records)) return RECENT_TASKS;
+      const added = records.filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && !['TASK-001','TASK-002','TASK-003','TASK-004'].includes(t.id)).map(t => ({
+        id:t.id, name:t.name, type:t.type || '评测任务', status: (['pending','running','completed','failed'].includes(t.status) ? t.status : 'pending') as Task['status'],
+        progress:t.status === 'completed' ? 100 : 0, creator:t.user || '当前用户', createTime:t.time || '',
+      }));
+      return [...added,...RECENT_TASKS];
+    } catch { return RECENT_TASKS; }
+  };
+  const [recentTasks,setRecentTasks] = React.useState(readRecentTasks);
+  React.useEffect(() => {
+    const update = () => setRecentTasks(readRecentTasks());
+    window.addEventListener('storage',update);window.addEventListener('platform-data-changed',update);
+    return () => {window.removeEventListener('storage',update);window.removeEventListener('platform-data-changed',update);};
+  },[]);
 
   const filteredTasks = React.useMemo(() => {
-    return RECENT_TASKS.filter(task => {
+    return recentTasks.filter(task => {
       const matchesSearch = task.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
                            task.id.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesType = typeFilter === 'all' || task.type === typeFilter;
@@ -102,18 +118,19 @@ export default function Workbench({ navigate }: WorkbenchProps) {
       
       return matchesSearch && matchesType && matchesStatus && matchesCreator;
     });
-  }, [searchQuery, typeFilter, statusFilter, creatorFilter]);
+  }, [searchQuery, typeFilter, statusFilter, creatorFilter, recentTasks]);
 
   const taskTypes = React.useMemo(() => {
-    return Array.from(new Set(RECENT_TASKS.map(t => t.type)));
-  }, []);
+    return Array.from(new Set(recentTasks.map(t => t.type)));
+  }, [recentTasks]);
 
   return (
     <div className="space-y-6">
+      {detailTask && <div className="fixed inset-0 z-[100] bg-black/50 flex items-center justify-center p-4"><div role="dialog" aria-modal="true" className="card p-6 w-full max-w-lg space-y-4"><h3 className="text-lg font-bold">{detailTask.name}</h3><dl className="grid grid-cols-2 gap-3 text-sm">{Object.entries({'任务ID':detailTask.id,'类型':detailTask.type,'进度':`${detailTask.progress}%`,'创建人':detailTask.creator,'创建时间':detailTask.createTime,'状态':{running:'进行中',completed:'已完成',failed:'已失败',pending:'待开始'}[detailTask.status]}).map(([label,value]) => <React.Fragment key={label}><dt className="text-[var(--text-secondary)]">{label}</dt><dd>{value}</dd></React.Fragment>)}</dl><div className="flex justify-end"><button className="px-4 py-2 bg-blue-600 text-white rounded-lg" onClick={() => setDetailTask(null)}>关闭</button></div></div></div>}
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {STATS.map((stat, i) => (
-          <div key={i} className="card p-5 flex flex-col justify-between">
+          <div key={i} title="原版汇总数据，实时统计需连接后台服务" className="card p-5 flex flex-col justify-between">
             <div className="flex justify-between items-start">
               <span className="text-sm text-[var(--text-secondary)] font-medium">{stat.label}</span>
               <div className={`flex items-center text-xs font-medium px-1.5 py-0.5 rounded ${
@@ -136,7 +153,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Resource Usage Chart */}
-        <div className="card p-6 lg:col-span-2">
+          <div title="资源展示数据，未连接实时采集服务" className="card p-6 lg:col-span-2">
           <div className="flex items-center justify-between mb-6">
             <h3 className="font-semibold text-[var(--text-primary)]">资源使用情况</h3>
             <div className="flex items-center space-x-4 text-xs">
@@ -185,7 +202,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
               {QUICK_ENTRIES.map((entry, i) => (
                 <button 
                   key={i} 
-                  onClick={() => navigate(entry.tab, entry.subTab)}
+                  onClick={() => navigate(entry.tab, entry.subTab, ['新建评测','生成报告'].includes(entry.label) ? {action:'create'} : entry.label === '数据导入' ? {action:'import'} : undefined)}
                   className="flex flex-col items-center justify-center p-4 rounded-xl border border-[var(--border-color)] hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-all group"
                 >
                   <div className={`w-10 h-10 ${entry.color} rounded-lg flex items-center justify-center text-white mb-2 shadow-lg shadow-blue-500/10`}>
@@ -198,7 +215,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
           </div>
 
           <div className="card p-6">
-            <h3 className="font-semibold text-[var(--text-primary)] mb-4">系统状态</h3>
+            <h3 title="原版预置状态，未连接实时健康检查服务" className="font-semibold text-[var(--text-primary)] mb-4">系统状态</h3>
             <div className="space-y-4">
               {[
                 { label: '评测引擎', status: 'normal', icon: Cpu },
@@ -348,10 +365,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
                   <td className="px-6 py-4">
                     <button 
                       onClick={() => {
-                        if (task.id === 'T-1024') navigate('evaluation', 'task-mgmt');
-                        if (task.id === 'T-1023') navigate('resource', 'perf-stats');
-                        if (task.id === 'T-1022') navigate('interface', 'api-compat');
-                        if (task.id === 'T-1021') navigate('annotation', 'img-anno');
+                        setDetailTask(task);
                       }}
                       className="text-blue-500 hover:text-blue-600 text-xs font-medium"
                     >

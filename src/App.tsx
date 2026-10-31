@@ -19,8 +19,11 @@ import { NAV_ITEMS } from './constants';
 export default function App() {
   const [activeTab, setActiveTab] = useState('workbench');
   const [activeSubTab, setActiveSubTab] = useState('');
+  const [navigationKey, setNavigationKey] = useState(0);
 
-  const navigate = (tabId: string, subTabId: string = '') => {
+  const navigate = (tabId: string, subTabId: string = '', intent?: {action?: string; query?: string; id?: string}) => {
+    if (intent) sessionStorage.setItem('platform-navigation', JSON.stringify({tab:tabId,subTab:subTabId,...intent}));
+    setNavigationKey(key => key + 1);
     setActiveTab(tabId);
     if (subTabId) {
       setActiveSubTab(subTabId);
@@ -86,9 +89,10 @@ export default function App() {
         }
       }}
       activeSubTab={activeSubTab}
-      setActiveSubTab={setActiveSubTab}
+      setActiveSubTab={(id) => {setActiveSubTab(id);setNavigationKey(key => key + 1);}}
+      navigate={navigate}
     >
-      {renderContent()}
+      <React.Fragment key={navigationKey}>{renderContent()}</React.Fragment>
     </Layout>
   );
 }

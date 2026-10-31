@@ -1,0 +1,56 @@
+{
+  "environment": "isolated local preview",
+  "completed": [
+    "用户创建空表单被required阻止",
+    "创建qa_flow_01，选择标注员并保存",
+    "新用户禁用、启用，表格状态对应",
+    "编辑姓名，用户名保持只读",
+    "按修改后姓名搜索正确返回一条",
+    "删除取消保留，再确认删除仅测试用户",
+    "原admin删除被保护，三个原用户保持",
+    "新增流程验收角色",
+    "选择评测管理和数据标注后保存：权限计数8，与实际5+3子项对应",
+    "切换模块后角色持久化",
+    "编辑测试角色名，删除取消保留，再确认删除",
+    "深浅主题切换",
+    "通知打开和关闭",
+    "帮助打开和关闭",
+    "退出无服务端会话提示且不清除记录",
+    "侧栏收起和展开",
+    "工作台五条记录逐条详情，对应自身ID、类型、进度、创建人和状态；含本地新建任务",
+    "工作台名称/ID、类型、状态、创建人筛选与重置",
+    "快速新建评测直接打开任务表单；数据导入打开文件选择并完成真实图片导入；生成报告直接打开报告表单；资源监控和查看全部路由正确",
+    "全局搜索分别进入测试任务、测试报告、图片标注、图片处理，关键字传入且返回匹配记录",
+    "三个外链逐一实际打开新标签，目标地址与配置相符，noopener noreferrer保留；未操作下游系统",
+    "重复用户名admin被拒绝；新用户默认使用实际存在的普通评测员角色",
+    "评测员筛选返回原eval_01；普通评测员和数据标注员删除均被已关联用户保护",
+    "内置管理员角色改名被拒绝；权限未保存切换角色先取消保留草稿、再确认放弃"
+  ],
+  "remaining": [],
+  "originalDataRegression": {
+    "isolatedOrigin": true,
+    "visitedInternalPages": 21,
+    "oldStorageKeys": 42,
+    "changedRawValues": 0,
+    "addedKeysOnRead": 0,
+    "originalDatabaseRecordCounts": [0, 6, 1, 1],
+    "databaseRecordCountsAfterRead": [0, 6, 1, 1],
+    "allModulesRetainOriginalRecords": true
+  },
+  "httpCompatibilityRegression": {
+    "liveOriginIsSecureContext": false,
+    "liveOriginRandomUUIDAvailable": false,
+    "isolatedLanOriginIsSecureContext": false,
+    "isolatedLanOriginRandomUUIDAvailable": false,
+    "actualImageImportCreatedUUID": true,
+    "recordsAfterImportAndReload": 7,
+    "uploadedImageDimensionsAfterReload": [1452, 366],
+    "originalSixImagesRetained": true
+  },
+  "reportVisualReview": {
+    "latestPdfRenderedAndInspected": true,
+    "chineseReadable": true,
+    "selectedTaskAndConfigMatch": true,
+    "missingMeasurementsRemainUnfilled": true
+  }
+}

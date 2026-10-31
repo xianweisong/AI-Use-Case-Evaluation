@@ -1,0 +1,29 @@
+{
+  "scope": "DataAnnotation and DataProcessing isolated browser QA",
+  "browser": "Earlier QA: TaskSpace 4, page p2; continuation: TaskSpace 2, page p1",
+  "checked": [
+    "Created an uploaded one-file image dataset, linked task, drew a rectangle, saved it, and exported COCO, YOLO, and Pascal VOC ZIPs; archive metadata and box coordinates matched the uploaded 1452x366 image.",
+    "Created a one-file 320x240 H264 video dataset and linked task; keyframe strategy warned unsupported without creating frames.",
+    "Extracted 2 frames by total-count strategy, 4 frames at 0.5-second intervals, and 2 frames at 1 FPS from the uploaded video.",
+    "Drew and saved a box on the first actual video frame, copied it to the second frame, and exported COCO with two 320x240 JPEGs and two corresponding annotations.",
+    "Cancelled then confirmed re-extraction; confirmed new frame UUIDs and pending status, with old frame metadata and annotations retained in frameHistory.",
+    "Reloaded and reopened the extracted video; original frame JPEG blobs and visible frame images were restored.",
+    "Imported a 1452x366 logo in DataProcessing; the new file displayed 28.8 KB and its preview opened and closed.",
+    "Searched and renamed a selected QA image using prefix, suffix, original name, timestamp, four-digit sequence starting at seven; executed and checked its CSV export, then deleted the extra QA image.",
+    "Used QA processing images to test duplicate names: skip preview and execution showed SKIPPED and 0 success / 1 skipped; rename produced QA_1_1.png; overwrite confirmation was cancelled once, then accepted to replace only the QA_1.png target, reducing the image count from 9 to 8.",
+    "Batch-imported three real 1452x366 PNG copies; the image table showed 11 total, page 1/2 with ten rows and page 2/2 with the remaining row.",
+    "In the QA image editor, blank and duplicate label names showed rejection alerts; cancelling label creation kept the label list unchanged; a new unused QA label was created and deleted, while deleting the in-use 人脸 label was rejected and its annotation remained.",
+    "Created a one-image unlinked QA dataset; cancelled an edit without changing its name, saved a second edit, cancelled its deletion once, then confirmed deletion. Deleting the QA video dataset linked to a task was rejected and the dataset remained.",
+    "After video re-extraction, the editor header showed 0 annotated / 2 pending / 2 total current frames. Drawing a 100x70 box on frame 1 changed it to 1 / 1 / 2 and 50% progress. Saved and reloaded the app; reopening the same video restored those counts, 50% progress, and the same 100x70 box."
+  ],
+  "notYetChecked": [
+    "Post-re-extraction video YOLO and Pascal VOC downloads were not repeated; video COCO and all three image formats were inspected earlier."
+  ],
+  "downloadsInspected": [
+    "/tmp/qa-annotation-coco.zip",
+    "/tmp/qa-annotation-yolo.zip",
+    "/tmp/qa-annotation-voc.zip",
+    "/tmp/qa-video-coco.zip",
+    "/tmp/qa-rename.csv"
+  ]
+}

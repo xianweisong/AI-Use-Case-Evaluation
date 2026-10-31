@@ -27,6 +27,7 @@ interface LayoutProps {
   setActiveTab: (id: string) => void;
   activeSubTab: string;
   setActiveSubTab: (id: string) => void;
+  navigate?: (tab: string, subTab: string, intent?: {action?: string; query?: string; id?: string}) => void;
 }
 
 export default function Layout({ 
@@ -34,11 +35,15 @@ export default function Layout({
   activeTab, 
   setActiveTab,
   activeSubTab,
-  setActiveSubTab
+  setActiveSubTab,
+  navigate
 }: LayoutProps) {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [expandedItems, setExpandedItems] = useState<string[]>(['evaluation']);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [panel, setPanel] = useState<'search' | 'notice' | 'help' | null>(null);
+  useEffect(() => { setExpandedItems(items => items.includes(activeTab) ? items : [...items,activeTab]); }, [activeTab]);
 
   useEffect(() => {
     if (isDarkMode) {
@@ -217,6 +222,9 @@ export default function Layout({
               <input 
                 type="text" 
                 placeholder="搜索任务、数据..." 
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                onKeyDown={e => {if(e.key === 'Enter' && searchQuery.trim()) setPanel('search');}}
                 className="pl-10 pr-4 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 w-64"
               />
             </div>
@@ -224,18 +232,19 @@ export default function Layout({
             {/* Theme Toggle */}
             <button 
               onClick={toggleDarkMode}
+              title={isDarkMode ? '切换浅色主题' : '切换深色主题'}
               className="p-2 rounded-lg hover:bg-[var(--bg-primary)] transition-colors text-[var(--text-secondary)]"
             >
               {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
             </button>
 
             {/* Notifications */}
-            <button className="p-2 rounded-lg hover:bg-[var(--bg-primary)] transition-colors text-[var(--text-secondary)] relative">
+            <button title="通知" onClick={() => setPanel('notice')} className="p-2 rounded-lg hover:bg-[var(--bg-primary)] transition-colors text-[var(--text-secondary)] relative">
               <Bell className="w-5 h-5" />
               <span className="absolute top-2 right-2 w-2 h-2 bg-red-500 rounded-full border-2 border-[var(--bg-secondary)]" />
             </button>
 
-            <button className="p-2 rounded-lg hover:bg-[var(--bg-primary)] transition-colors text-[var(--text-secondary)]">
+            <button title="帮助" onClick={() => setPanel('help')} className="p-2 rounded-lg hover:bg-[var(--bg-primary)] transition-colors text-[var(--text-secondary)]">
               <HelpCircle className="w-5 h-5" />
             </button>
 
@@ -250,7 +259,7 @@ export default function Layout({
               <div className="w-9 h-9 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center text-blue-600 border border-blue-200 dark:border-blue-800">
                 <User className="w-5 h-5" />
               </div>
-              <button className="p-1 rounded hover:bg-[var(--bg-primary)] text-[var(--text-secondary)]">
+              <button title="退出" onClick={() => window.alert('当前平台未接入登录服务，没有可退出的服务端会话。原有数据将保留。')} className="p-1 rounded hover:bg-[var(--bg-primary)] text-[var(--text-secondary)]">
                 <LogOut className="w-4 h-4" />
               </button>
             </div>
@@ -273,6 +282,9 @@ export default function Layout({
           </AnimatePresence>
         </main>
       </div>
+      {panel && <div className="fixed inset-0 z-[100] bg-black/50 flex items-center justify-center p-4"><div role="dialog" aria-modal="true" className="card p-6 w-full max-w-lg space-y-4"><div className="flex justify-between items-center"><h3 className="text-lg font-bold">{panel === 'search' ? '搜索任务、数据' : panel === 'notice' ? '通知' : '帮助'}</h3><button title="关闭" onClick={() => setPanel(null)}><X className="w-5 h-5" /></button></div>
+        {panel === 'search' ? <><p className="text-sm text-[var(--text-secondary)]">选择范围，查找“{searchQuery.trim()}”</p><div className="grid grid-cols-2 gap-3">{[{tab:'evaluation',sub:'task-mgmt',label:'测试任务'},{tab:'evaluation',sub:'reports',label:'测试报告'},{tab:'annotation',sub:'img-anno',label:'图片标注'},{tab:'data-proc',sub:'img-proc',label:'图片处理'}].map(item => <button key={item.sub} className="p-3 border border-[var(--border-color)] rounded-lg text-blue-500" onClick={() => {navigate?.(item.tab,item.sub,{query:searchQuery.trim()}); setPanel(null);}}>{item.label}</button>)}</div></> : <p className="text-sm leading-7 text-[var(--text-secondary)]">{panel === 'notice' ? '当前没有接入后台消息服务，暂无新增通知。已保存记录不会因查看通知而改变。' : '在左侧选择模块，使用新建、配置、运行、详情和导出完成操作。标注和数据处理支持本地文件；真实 UI、接口、性能测试及资源采集需要配置可执行的测试系统。未接入时不会向现网系统发起测试，也不会生成实测结果。'}</p>}
+      </div></div>}
     </div>
   );
 }

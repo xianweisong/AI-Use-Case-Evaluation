@@ -30,6 +30,8 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { createModuleStore } from '../lib/platformStorage';
+import { NAV_ITEMS } from '../constants';
 import { 
   BarChart, 
   Bar, 
@@ -68,14 +70,74 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
     { user: 'anno_02', name: '李四', role: '标注员', status: 'disabled', time: '2026-02-20 09:30' },
   ];
 
+  const ROLES = [
+    { name: '超级管理员', perms: 24, time: '2026-01-01' },
+    { name: '评测管理员', perms: 18, time: '2026-01-10' },
+    { name: '普通评测员', perms: 12, time: '2026-02-01' },
+    { name: '数据标注员', perms: 8, time: '2026-02-05' },
+  ];
+  const modules = NAV_ITEMS.filter(n => n.subItems);
+  const permissionIds = modules.flatMap(n => n.subItems!.map(s => s.id));
+  const [store] = useState(() => createModuleStore('as-eval-system-records', {
+    users: USERS,
+    roles: ROLES.map(r => ({ ...r, permissions: permissionIds.slice(0, r.perms) })),
+  }, (v): v is { users: typeof USERS; roles: (typeof ROLES[number] & {permissions: string[]})[] } => !!v && Array.isArray((v as any).users) && (v as any).users.every((u:any) => u && ['user','name','role','status','time'].every(k => typeof u[k] === 'string')) && Array.isArray((v as any).roles) && (v as any).roles.length > 0 && (v as any).roles.every((r:any) => r && typeof r.name === 'string' && Array.isArray(r.permissions) && r.permissions.every((id:any) => typeof id === 'string'))));
+  const [records, setRecords] = useState(store.initial);
+  const [selectedRole, setSelectedRole] = useState('评测管理员');
+  const role = records.roles.find(r => r.name === selectedRole) ?? records.roles[0];
+  const [draftPermissions, setDraftPermissions] = useState(role?.permissions ?? []);
+  const [editor, setEditor] = useState<null | {kind: 'user' | 'role'; original?: string; user: string; name: string; role: string}>(null);
+  const saveRecords = (next: typeof records) => {
+    try { store.save(next); setRecords(next); return true; }
+    catch (error) { window.alert(String(error)); return false; }
+  };
+  const roleName = (name: string) => ({评测员: '普通评测员', 标注员: '数据标注员'}[name] ?? name);
+  const selectRole = (name: string) => {
+    if (JSON.stringify(draftPermissions) !== JSON.stringify(role?.permissions) && !window.confirm('权限尚未保存，放弃修改并切换角色？')) return;
+    setSelectedRole(name); setDraftPermissions(records.roles.find(r => r.name === name)?.permissions ?? []);
+  };
+  const saveEditor = (event: React.FormEvent) => {
+    event.preventDefault(); if (!editor) return;
+    const name = editor.name.trim(), user = editor.user.trim();
+    if (!name || (editor.kind === 'user' && !/^[a-zA-Z0-9_.-]{2,40}$/.test(user))) { window.alert('请填写姓名；用户名须为 2–40 位字母、数字、下划线、点或短横线。'); return; }
+    if (editor.kind === 'user') {
+      if (records.users.some(u => u.user === user && u.user !== editor.original)) { window.alert('用户名已存在。'); return; }
+      if (!records.roles.some(r => r.name === roleName(editor.role))) { window.alert('所选角色已不存在，请重新选择有效角色。'); return; }
+      const old = records.users.find(u => u.user === editor.original);
+      const item = { user, name, role: editor.role, status: old?.status ?? 'enabled', time: old?.time ?? new Date().toLocaleString('sv-SE').slice(0,16) };
+      if (saveRecords({...records, users: old ? records.users.map(u => u.user === old.user ? item : u) : [...records.users,item]})) setEditor(null);
+    } else {
+      if (records.roles.some(r => roleName(r.name) === roleName(name) && r.name !== editor.original)) { window.alert('角色名称已存在。'); return; }
+      const old = records.roles.find(r => r.name === editor.original);
+      const item = old ? {...old, name} : {name, perms:0, time:new Date().toLocaleDateString('sv-SE'), permissions:[]};
+      const next = {...records, roles: old ? records.roles.map(r => r.name === old.name ? item : r) : [...records.roles,item], users: old ? records.users.map(u => roleName(u.role) === old.name ? {...u,role:name} : u) : records.users};
+      if (saveRecords(next)) { setSelectedRole(name); setDraftPermissions(item.permissions); setEditor(null); }
+    }
+  };
+  const deleteUser = (user: string) => {
+    if (user === 'admin') return window.alert('系统管理员不能删除。');
+    if (window.confirm(`确认删除用户 ${user}？`)) saveRecords({...records,users:records.users.filter(u => u.user !== user)});
+  };
+  const toggleUser = (user: string) => {
+    if (user === 'admin') return window.alert('系统管理员不能禁用。');
+    saveRecords({...records,users:records.users.map(u => u.user === user ? {...u,status:u.status === 'enabled' ? 'disabled' : 'enabled'} : u)});
+  };
+  const deleteRole = (name: string) => {
+    if (name === '超级管理员' || records.users.some(u => roleName(u.role) === name)) return window.alert('该角色已被用户使用，不能删除。');
+    if (window.confirm(`确认删除角色 ${name}？`)) {
+      const next={...records,roles:records.roles.filter(r => r.name !== name)};
+      if (saveRecords(next) && selectedRole === name) { setSelectedRole(next.roles[0].name); setDraftPermissions(next.roles[0].permissions); }
+    }
+  };
+
   const filteredUsers = React.useMemo(() => {
-    return USERS.filter(u => {
+    return records.users.filter(u => {
       const matchesSearch = u.user.toLowerCase().includes(userSearch.toLowerCase()) || 
                            u.name.toLowerCase().includes(userSearch.toLowerCase());
-      const matchesRole = userRoleFilter === '所有角色' || u.role === userRoleFilter;
+      const matchesRole = userRoleFilter === '所有角色' || roleName(u.role) === roleName(userRoleFilter);
       return matchesSearch && matchesRole;
     });
-  }, [userSearch, userRoleFilter]);
+  }, [userSearch, userRoleFilter, records.users]);
 
   useEffect(() => {
     setView('list');
@@ -106,7 +168,7 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h2 className="text-2xl font-bold text-[var(--text-primary)]">用户管理</h2>
-        <button className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-all">
+        <button onClick={() => setEditor({kind:'user',user:'',name:'',role:records.roles.find(r => r.name === '普通评测员')?.name ?? records.roles.find(r => r.name !== '超级管理员')?.name ?? records.roles[0].name})} className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-all">
           <UserPlus className="w-4 h-4 mr-2" /> 新增用户
         </button>
       </div>
@@ -131,6 +193,7 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
           <option>超级管理员</option>
           <option>评测员</option>
           <option>标注员</option>
+          {records.roles.filter(r => !['超级管理员','普通评测员','数据标注员'].includes(r.name)).map(r => <option key={r.name}>{r.name}</option>)}
         </select>
       </div>
 
@@ -163,12 +226,12 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{u.time}</td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-2">
-                    <button className="p-1.5 hover:bg-blue-50 text-blue-500 rounded"><Edit2 className="w-4 h-4" /></button>
-                    <button className="p-1.5 hover:bg-red-50 text-red-500 rounded"><Trash2 className="w-4 h-4" /></button>
+                    <button title="编辑用户" onClick={() => setEditor({kind:'user',original:u.user,...u})} className="p-1.5 hover:bg-blue-50 text-blue-500 rounded"><Edit2 className="w-4 h-4" /></button>
+                    <button title="删除用户" onClick={() => deleteUser(u.user)} className="p-1.5 hover:bg-red-50 text-red-500 rounded"><Trash2 className="w-4 h-4" /></button>
                     {u.status === 'enabled' ? (
-                      <button className="p-1.5 hover:bg-orange-50 text-orange-500 rounded" title="禁用"><XCircle className="w-4 h-4" /></button>
+                      <button onClick={() => toggleUser(u.user)} className="p-1.5 hover:bg-orange-50 text-orange-500 rounded" title="禁用"><XCircle className="w-4 h-4" /></button>
                     ) : (
-                      <button className="p-1.5 hover:bg-emerald-50 text-emerald-500 rounded" title="启用"><CheckCircle2 className="w-4 h-4" /></button>
+                      <button onClick={() => toggleUser(u.user)} className="p-1.5 hover:bg-emerald-50 text-emerald-500 rounded" title="启用"><CheckCircle2 className="w-4 h-4" /></button>
                     )}
                   </div>
                 </td>
@@ -191,7 +254,7 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <h2 className="text-2xl font-bold text-[var(--text-primary)]">权限管理</h2>
-        <button className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-all">
+        <button onClick={() => setEditor({kind:'role',user:'',name:'',role:''})} className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-all">
           <Plus className="w-4 h-4 mr-2" /> 新增角色
         </button>
       </div>
@@ -203,23 +266,18 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
               <h3 className="text-sm font-bold text-[var(--text-secondary)] uppercase">角色列表</h3>
             </div>
             <div className="divide-y divide-[var(--border-color)]">
-              {[
-                { name: '超级管理员', perms: 24, time: '2026-01-01' },
-                { name: '评测管理员', perms: 18, time: '2026-01-10' },
-                { name: '普通评测员', perms: 12, time: '2026-02-01' },
-                { name: '数据标注员', perms: 8, time: '2026-02-05' },
-              ].map((r, i) => (
-                <div key={i} className={cn(
+              {records.roles.map((r, i) => (
+                <div key={r.name} role="button" tabIndex={0} onClick={() => selectRole(r.name)} onKeyDown={e => {if(e.key === 'Enter') selectRole(r.name);}} className={cn(
                   "px-6 py-4 flex items-center justify-between hover:bg-[var(--bg-primary)] cursor-pointer transition-colors",
-                  i === 1 && "bg-blue-50/50 dark:bg-blue-900/10 border-l-4 border-blue-600"
+                  r.name === selectedRole && "bg-blue-50/50 dark:bg-blue-900/10 border-l-4 border-blue-600"
                 )}>
                   <div>
                     <p className="text-sm font-bold text-[var(--text-primary)]">{r.name}</p>
                     <p className="text-[10px] text-[var(--text-secondary)] mt-1">{r.perms} 个权限 · {r.time}</p>
                   </div>
                   <div className="flex items-center space-x-2">
-                    <button className="p-1 hover:bg-blue-50 text-blue-500 rounded"><Edit2 className="w-3.5 h-3.5" /></button>
-                    <button className="p-1 hover:bg-red-50 text-red-500 rounded"><Trash2 className="w-3.5 h-3.5" /></button>
+                    <button title="编辑角色" onClick={e => {e.stopPropagation(); if(r.name === '超级管理员') return window.alert('内置管理员角色不能改名。'); setEditor({kind:'role',original:r.name,name:r.name,user:'',role:''});}} className="p-1 hover:bg-blue-50 text-blue-500 rounded"><Edit2 className="w-3.5 h-3.5" /></button>
+                    <button title="删除角色" onClick={e => {e.stopPropagation(); deleteRole(r.name);}} className="p-1 hover:bg-red-50 text-red-500 rounded"><Trash2 className="w-3.5 h-3.5" /></button>
                   </div>
                 </div>
               ))}
@@ -231,9 +289,9 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
           <div className="card p-6 space-y-6">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-[var(--text-secondary)] uppercase flex items-center">
-                <Shield className="w-4 h-4 mr-2 text-blue-500" /> 权限配置: 评测管理员
+                <Shield className="w-4 h-4 mr-2 text-blue-500" /> 权限配置: {role?.name}
               </h3>
-              <button className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-bold hover:bg-blue-700 transition-all">
+              <button onClick={() => {if(saveRecords({...records,roles:records.roles.map(r => r.name === role?.name ? {...r,permissions:draftPermissions,perms:draftPermissions.length} : r)})) window.alert('权限配置已保存至当前浏览器。服务端鉴权需接入后台后生效。');}} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-bold hover:bg-blue-700 transition-all">
                 保存权限
               </button>
             </div>
@@ -249,7 +307,7 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
                     </div>
                     <span className="text-sm font-medium text-[var(--text-primary)]">{module}</span>
                   </div>
-                  <input type="checkbox" className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" defaultChecked={module !== '系统管理'} />
+                  <input type="checkbox" aria-label={module} className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" disabled={role?.name === '超级管理员'} checked={modules.find(n => n.label === module)!.subItems!.every(s => draftPermissions.includes(s.id))} ref={el => {const ids=modules.find(n => n.label === module)!.subItems!.map(s => s.id); if(el) el.indeterminate=ids.some(id => draftPermissions.includes(id)) && !ids.every(id => draftPermissions.includes(id));}} onChange={e => {const ids=modules.find(n => n.label === module)!.subItems!.map(s => s.id); setDraftPermissions(e.target.checked ? [...new Set([...draftPermissions,...ids])] : draftPermissions.filter(id => !ids.includes(id)));}} />
                 </div>
               ))}
             </div>
@@ -569,6 +627,13 @@ export default function SystemManagement({ activeSubTab }: SystemManagementProps
 
   return (
     <div className="h-full">
+      {editor && <div className="fixed inset-0 z-[100] bg-black/50 flex items-center justify-center p-4"><form onSubmit={saveEditor} role="dialog" aria-modal="true" aria-label={editor.kind === 'user' ? '用户信息' : '角色信息'} className="card p-6 w-full max-w-md space-y-4">
+        <h3 className="text-lg font-bold">{editor.original ? '编辑' : '新增'}{editor.kind === 'user' ? '用户' : '角色'}</h3>
+        {editor.kind === 'user' && <label className="block text-sm">用户名<input required disabled={!!editor.original} value={editor.user} onChange={e => setEditor({...editor,user:e.target.value})} className="w-full p-2 mt-2 border border-[var(--border-color)] bg-[var(--bg-primary)] rounded-lg" /></label>}
+        <label className="block text-sm">{editor.kind === 'user' ? '姓名' : '角色名称'}<input required maxLength={40} value={editor.name} onChange={e => setEditor({...editor,name:e.target.value})} className="w-full p-2 mt-2 border border-[var(--border-color)] bg-[var(--bg-primary)] rounded-lg" /></label>
+        {editor.kind === 'user' && <label className="block text-sm">角色<select disabled={editor.original === 'admin'} value={editor.role} onChange={e => setEditor({...editor,role:e.target.value})} className="w-full p-2 mt-2 border border-[var(--border-color)] bg-[var(--bg-primary)] rounded-lg">{[...new Set([...records.users.map(u => u.role),...records.roles.map(r => r.name)])].map(name => <option key={name}>{name}</option>)}</select></label>}
+        <div className="flex justify-end gap-3"><button type="button" onClick={() => setEditor(null)} className="px-4 py-2 border border-[var(--border-color)] rounded-lg">取消</button><button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-lg">保存</button></div>
+      </form></div>}
       <AnimatePresence mode="wait">
         <motion.div
           key={`${activeSubTab}-${view}`}
