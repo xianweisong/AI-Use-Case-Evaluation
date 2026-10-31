@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { useNavigationReset } from '../lib/useNavigationReset';
 import { 
   Image as ImageIcon, 
   Plus, 
@@ -26,6 +27,9 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { planImageNames, readImageDimensions, validateNamingRule, type NamingRule, type NamingResult } from '../lib/dataProcessing';
+import { createZip, downloadBlob } from '../lib/zip';
+import { loadStoredImages, saveStoredImages } from '../lib/dataProcessingStorage';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -45,36 +49,36 @@ interface ImageData {
   uploadTime: string;
   url: string;
   selected?: boolean;
+  file: File;
 }
-
-interface NamingRule {
-  prefix: string;
-  suffix: string;
-  startNumber: number;
-  digits: number;
-  useTimestamp: boolean;
-  useOriginalName: boolean;
-  duplicateHandling: 'skip' | 'overwrite' | 'rename';
-}
-
-interface ProcessResult {
-  originalName: string;
-  newName: string;
-  status: 'success' | 'error';
-}
-
-const MOCK_IMAGES: ImageData[] = [
-  { id: '1', name: 'IMG_20240101_001.jpg', size: '1.2 MB', resolution: '1920x1080', uploadTime: '2026-03-01 10:00', url: 'https://picsum.photos/seed/img1/800/600' },
-  { id: '2', name: 'IMG_20240101_002.jpg', size: '2.4 MB', resolution: '3840x2160', uploadTime: '2026-03-01 10:05', url: 'https://picsum.photos/seed/img2/800/600' },
-  { id: '3', name: 'IMG_20240101_003.jpg', size: '1.5 MB', resolution: '1920x1080', uploadTime: '2026-03-01 10:10', url: 'https://picsum.photos/seed/img3/800/600' },
-  { id: '4', name: 'IMG_20240101_004.jpg', size: '0.8 MB', resolution: '1280x720', uploadTime: '2026-03-01 10:15', url: 'https://picsum.photos/seed/img4/800/600' },
-  { id: '5', name: 'IMG_20240101_005.jpg', size: '3.1 MB', resolution: '4096x2304', uploadTime: '2026-03-01 10:20', url: 'https://picsum.photos/seed/img5/800/600' },
-  { id: '6', name: 'IMG_20240101_006.jpg', size: '1.1 MB', resolution: '1920x1080', uploadTime: '2026-03-01 10:25', url: 'https://picsum.photos/seed/img6/800/600' },
-];
 
 export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
   const [view, setView] = useState<ViewState>('list');
-  const [images, setImages] = useState<ImageData[]>(MOCK_IMAGES);
+  useNavigationReset(() => setView(activeSubTab === 'batch-rename' ? 'naming' : 'list'));
+  const [images, setImages] = useState<ImageData[]>([]);
+  const [search, setSearch] = useState('');
+  const [busy, setBusy] = useState(true);
+  const [storageError, setStorageError] = useState('');
+  const [archive, setArchive] = useState<Blob | null>(null);
+  const [stamp] = useState(() => new Date().toLocaleDateString('sv-SE').replace(/-/g, ''));
+  const locked = React.useRef(true);
+  const lifetime = React.useRef(new AbortController());
+  const urls = React.useRef(new Set<string>());
+  React.useEffect(() => () => { urls.current.forEach(url => URL.revokeObjectURL(url)); }, []);
+  React.useEffect(() => {
+    lifetime.current = new AbortController();
+    const controller = lifetime.current;
+    let cancelled = false;
+    loadStoredImages().then(records => {
+      if (cancelled) return;
+      setImages(records.map(record => {
+        const url = URL.createObjectURL(record.file); urls.current.add(url);
+        return { ...record, url };
+      }));
+    }).catch(error => { if (!cancelled) setStorageError(error instanceof Error ? error.message : '读取本地图片失败'); })
+      .finally(() => { if (!cancelled) { locked.current = false; setBusy(false); } });
+    return () => { cancelled = true; controller.abort(); };
+  }, []);
   const [previewImage, setPreviewImage] = useState<ImageData | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [namingRule, setNamingRule] = useState<NamingRule>({
@@ -86,7 +90,7 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
     useOriginalName: false,
     duplicateHandling: 'rename',
   });
-  const [results, setResults] = useState<ProcessResult[]>([]);
+  const [results, setResults] = useState<NamingResult[]>([]);
 
   // Reset view when subtab changes
   React.useEffect(() => {
@@ -94,68 +98,83 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
     if (activeSubTab === 'batch-rename') setView('naming');
   }, [activeSubTab]);
 
-  // Helper to generate new name based on rules
-  const generateNewName = (originalName: string, index: number, currentGeneratedNames: string[] = []) => {
-    const ext = originalName.split('.').pop();
-    let name = namingRule.prefix;
-    
-    if (namingRule.useOriginalName) {
-      name += originalName.split('.')[0];
-    }
-    
-    if (namingRule.useTimestamp) {
-      name += new Date().toISOString().split('T')[0].replace(/-/g, '');
-    }
-    
-    const num = (namingRule.startNumber + index).toString().padStart(namingRule.digits, '0');
-    name += num;
-    
-    if (namingRule.suffix) {
-      name += namingRule.suffix;
-    }
-    
-    let finalName = `${name}.${ext}`;
-    
-    // Check for duplicates in existing images or already generated names in this batch
-    const allExistingNames = [...images.map(img => img.name), ...currentGeneratedNames];
-    
-    if (allExistingNames.includes(finalName)) {
-      if (namingRule.duplicateHandling === 'skip') {
-        return null;
-      } else if (namingRule.duplicateHandling === 'rename') {
-        let counter = 1;
-        while (allExistingNames.includes(`${name}_${counter}.${ext}`)) {
-          counter++;
-        }
-        finalName = `${name}_${counter}.${ext}`;
-      }
-      // 'overwrite' returns the name as is
-    }
-    
-    return finalName;
-  };
-
   const exampleName = useMemo(() => {
-    return generateNewName('example.jpg', 0) || 'example.jpg';
-  }, [namingRule, images]);
+    try { return planImageNames([{ id: 'example', name: 'example.jpg' }], [], namingRule, stamp)[0].newName; }
+    catch (error) { return error instanceof Error ? error.message : '命名规则无效'; }
+  }, [namingRule, stamp]);
 
   const selectedImages = useMemo(() => {
     return images.filter(img => selectedIds.includes(img.id));
   }, [images, selectedIds]);
 
-  const previewResults = useMemo(() => {
-    const generated: string[] = [];
-    return selectedImages.map((img, idx) => {
-      const newName = generateNewName(img.name, idx, generated);
-      if (newName) generated.push(newName);
-      
-      return {
-        originalName: img.name,
-        newName: newName || '(已跳过)',
-        status: newName ? 'success' as const : 'error' as const
-      };
-    });
-  }, [selectedImages, namingRule, images]);
+  const namingPlan = useMemo(() => {
+    try { return { results: planImageNames(selectedImages, images, namingRule, stamp), error: null }; }
+    catch (error) { return { results: [], error: error instanceof Error ? error.message : '命名失败' }; }
+  }, [selectedImages, namingRule, images, stamp]);
+  const previewResults = namingPlan.results;
+  const visibleImages = images.filter(image => image.name.toLowerCase().includes(search.toLowerCase()));
+
+  const importImages = (multiple: boolean) => {
+    if (locked.current || lifetime.current.signal.aborted) return;
+    if (storageError) { alert(storageError); return; }
+    const input = document.createElement('input');
+    input.type = 'file'; input.accept = 'image/*'; input.multiple = multiple;
+    input.onchange = async () => {
+      if (!input.files?.length || locked.current || lifetime.current.signal.aborted) return;
+      const signal = lifetime.current.signal;
+      locked.current = true;
+      setBusy(true);
+      const imported: ImageData[] = [];
+      const errors: string[] = [];
+      for (const file of Array.from(input.files)) {
+        if (signal.aborted) break;
+        const url = URL.createObjectURL(file);
+        try {
+          if (!file.type.startsWith('image/')) throw new Error('请选择图片文件');
+          const { width, height } = await readImageDimensions(url);
+          if (signal.aborted) { URL.revokeObjectURL(url); break; }
+          urls.current.add(url);
+          const id = globalThis.crypto?.randomUUID?.() || `image-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          imported.push({ id, file, name: file.name, size: `${(file.size / 1024 / 1024).toFixed(2)} MB`, resolution: `${width}x${height}`, uploadTime: new Date().toLocaleString('zh-CN'), url });
+        } catch { URL.revokeObjectURL(url); errors.push(file.name); }
+      }
+      try {
+        const next = [...imported, ...images];
+        await saveStoredImages(next, signal);
+        if (!signal.aborted) setImages(next);
+      } catch (error) {
+        imported.forEach(image => { URL.revokeObjectURL(image.url); urls.current.delete(image.url); });
+        if (!signal.aborted) alert(`图片未保存：${error instanceof Error ? error.message : '本地存储失败'}`);
+      } finally { if (!signal.aborted) { locked.current = false; setBusy(false); } }
+      if (!signal.aborted && errors.length) alert(`以下文件无法解码：${errors.join('、')}`);
+    };
+    input.click();
+  };
+
+  const executeNaming = async () => {
+    if (locked.current || lifetime.current.signal.aborted) return;
+    const signal = lifetime.current.signal;
+    if (namingPlan.error || !selectedImages.length) { alert(namingPlan.error || '请先选择图片'); return; }
+    const successes = previewResults.filter(result => result.status === 'success');
+    if (!successes.length) { alert('全部文件被跳过，请调整命名规则'); return; }
+    locked.current = true; setBusy(true);
+    try {
+      const entries = await Promise.all(successes.map(async result => {
+        const image = selectedImages.find(image => image.id === result.id)!;
+        return { name: result.newName, data: new Uint8Array(await image.file.arrayBuffer()) };
+      }));
+      if (signal.aborted) return;
+      const zip = createZip(entries);
+      const byId = new Map(successes.map(result => [result.id, result]));
+      const outputNames = new Set(successes.map(result => result.newName.toLowerCase()));
+      const next = images.filter(image => byId.has(image.id) || !outputNames.has(image.name.toLowerCase())).map(image => byId.has(image.id) ? { ...image, name: byId.get(image.id)!.newName } : image);
+      await saveStoredImages(next, signal);
+      if (signal.aborted) return;
+      setImages(next);
+      setResults(previewResults); setArchive(zip); setSelectedIds([]); setView('result');
+    } catch (error) { if (!signal.aborted) alert(`命名未完成：${error instanceof Error ? error.message : '无法读取文件或生成 ZIP'}`); }
+    finally { if (!signal.aborted) { locked.current = false; setBusy(false); } }
+  };
 
   // --- Sub-page Renders ---
 
@@ -164,61 +183,19 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold text-[var(--text-primary)]">图片处理</h2>
-          <p className="text-sm text-[var(--text-secondary)] mt-1">管理与预览待处理的图片资源</p>
+          <p className="text-sm text-[var(--text-secondary)] mt-1">管理与预览待处理的图片资源；图片保存在本浏览器，重要文件请及时导出备份{storageError ? `；${storageError}` : ''}</p>
         </div>
         <div className="flex items-center space-x-3">
           <button 
-            onClick={() => {
-              const input = document.createElement('input');
-              input.type = 'file';
-              input.accept = 'image/*';
-              input.onchange = (e: any) => {
-                const file = e.target.files[0];
-                if (file) {
-                  const newImg: ImageData = {
-                    id: `IMG-${Date.now()}`,
-                    name: file.name,
-                    size: (file.size / (1024 * 1024)).toFixed(1) + ' MB',
-                    resolution: '1920x1080', // Mock resolution
-                    uploadTime: new Date().toISOString().split('T')[0] + ' ' + new Date().toTimeString().split(' ')[0].slice(0, 5),
-                    url: URL.createObjectURL(file)
-                  };
-                  setImages(prev => [newImg, ...prev]);
-                  alert('图片导入成功');
-                }
-              };
-              input.click();
-            }}
+            onClick={() => importImages(false)}
+            disabled={busy}
             className="flex items-center px-4 py-2 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg text-sm font-medium hover:bg-[var(--bg-primary)] transition-all"
           >
             <Plus className="w-4 h-4 mr-2" /> 导入图片
           </button>
           <button 
-            onClick={() => {
-              const input = document.createElement('input');
-              input.type = 'file';
-              input.accept = 'image/*';
-              input.multiple = true;
-              input.onchange = (e: any) => {
-                const files = e.target.files;
-                if (files && files.length > 0) {
-                  const newImages: ImageData[] = Array.from(files).map((f: any, idx) => {
-                    const file = f as File;
-                    return {
-                      id: `IMG-${Date.now()}-${idx}`,
-                      name: file.name,
-                      size: (file.size / (1024 * 1024)).toFixed(1) + ' MB',
-                      resolution: '1920x1080',
-                      uploadTime: new Date().toISOString().split('T')[0] + ' ' + new Date().toTimeString().split(' ')[0].slice(0, 5),
-                      url: URL.createObjectURL(file)
-                    };
-                  });
-                  setImages(prev => [...newImages, ...prev]);
-                  alert(`成功批量导入 ${newImages.length} 张图片`);
-                }
-              };
-              input.click();
-            }}
+            onClick={() => importImages(true)}
+            disabled={busy}
             className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-all"
           >
             <Upload className="w-4 h-4 mr-2" /> 批量导入
@@ -233,12 +210,15 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
           <input 
             type="text" 
             placeholder="搜索图片名称..." 
+            value={search}
+            onChange={event => setSearch(event.target.value)}
             className="w-full pl-10 pr-4 py-2 bg-[var(--bg-primary)] border border-[var(--border-color)] rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500/20" 
           />
         </div>
         <div className="flex items-center space-x-2">
           <button 
             onClick={() => setView('naming')}
+            disabled={busy}
             className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 transition-all flex items-center"
           >
             批量命名 <ChevronRight className="w-4 h-4 ml-1" />
@@ -260,7 +240,7 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--border-color)]">
-            {images.map((img) => (
+            {visibleImages.map((img) => (
               <tr key={img.id} className="hover:bg-[var(--bg-primary)] transition-colors group">
                 <td className="px-6 py-3">
                   <div className="w-12 h-12 rounded bg-slate-100 dark:bg-slate-800 overflow-hidden cursor-pointer" onClick={() => setPreviewImage(img)}>
@@ -276,7 +256,21 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
                     <button onClick={() => setPreviewImage(img)} className="p-1.5 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-blue-500 rounded" title="预览">
                       <Eye className="w-4 h-4" />
                     </button>
-                    <button className="p-1.5 hover:bg-red-50 dark:hover:bg-red-900/20 text-red-500 rounded" title="删除">
+                    <button disabled={busy} onClick={async () => {
+                      if (locked.current || lifetime.current.signal.aborted) return;
+                      if (!confirm(`删除本地图片“${img.name}”？`)) return;
+                      const signal = lifetime.current.signal;
+                      locked.current = true; setBusy(true);
+                      try {
+                        const next = images.filter(image => image.id !== img.id);
+                        await saveStoredImages(next, signal);
+                        if (signal.aborted) return;
+                        setImages(next);
+                        setSelectedIds(previous => previous.filter(id => id !== img.id));
+                        URL.revokeObjectURL(img.url); urls.current.delete(img.url);
+                      } catch (error) { if (!signal.aborted) alert(`删除未完成：${error instanceof Error ? error.message : '本地存储失败'}`); }
+                      finally { if (!signal.aborted) { locked.current = false; setBusy(false); } }
+                    }} className="p-1.5 hover:bg-red-50 dark:hover:bg-red-900/20 text-red-500 rounded" title="删除">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -286,11 +280,11 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
           </tbody>
         </table>
         <div className="px-6 py-4 bg-[var(--bg-primary)] border-t border-[var(--border-color)] flex items-center justify-between">
-          <p className="text-xs text-[var(--text-secondary)]">共 {images.length} 张图片</p>
+          <p className="text-xs text-[var(--text-secondary)]">共 {images.length} 张图片{!images.length ? '，请先导入本地图片' : ''}{busy ? '（正在处理…）' : ''}</p>
           <div className="flex items-center space-x-2">
             <button className="px-3 py-1 border border-[var(--border-color)] rounded text-xs hover:bg-[var(--bg-secondary)] disabled:opacity-50" disabled>上一页</button>
             <button className="px-3 py-1 border border-[var(--border-color)] rounded text-xs bg-blue-600 text-white">1</button>
-            <button className="px-3 py-1 border border-[var(--border-color)] rounded text-xs hover:bg-[var(--bg-secondary)]">下一页</button>
+            <button disabled className="px-3 py-1 border border-[var(--border-color)] rounded text-xs hover:bg-[var(--bg-secondary)]">下一页</button>
           </div>
         </div>
       </div>
@@ -345,7 +339,7 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
   const renderBatchNaming = () => (
     <div className="space-y-6">
       <div className="flex items-center space-x-2">
-        <button onClick={() => setView('list')} className="p-2 hover:bg-[var(--bg-secondary)] rounded-lg text-[var(--text-secondary)]">
+        <button disabled={busy} onClick={() => setView('list')} className="p-2 hover:bg-[var(--bg-secondary)] rounded-lg text-[var(--text-secondary)]">
           <ArrowLeft className="w-5 h-5" />
         </button>
         <h2 className="text-2xl font-bold text-[var(--text-primary)]">批量命名</h2>
@@ -409,7 +403,7 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
               </table>
             </div>
             <div className="px-6 py-4 bg-[var(--bg-primary)] border-t border-[var(--border-color)]">
-              <p className="text-xs text-[var(--text-secondary)]">已选择 <span className="font-bold text-blue-600">{selectedIds.length}</span> 张图片</p>
+              <p className="text-xs text-[var(--text-secondary)]">已选择 <span className="font-bold text-blue-600">{selectedIds.length}</span> 张图片；保存在本浏览器，请及时导出备份{storageError ? `；${storageError}` : ''}</p>
             </div>
           </div>
         </div>
@@ -534,7 +528,7 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
                 </div>
                 <p className="text-[10px] text-[var(--text-secondary)] leading-tight">
                   {namingRule.duplicateHandling === 'skip' && "检测到重名时，将不处理该文件。"}
-                  {namingRule.duplicateHandling === 'overwrite' && "检测到重名时，将直接覆盖目标文件。"}
+                  {namingRule.duplicateHandling === 'overwrite' && "检测到重名时，将替换本次列表中的目标文件，不修改磁盘原文件。"}
                   {namingRule.duplicateHandling === 'rename' && "检测到重名时，将自动在文件名后添加数字序号。"}
                 </p>
               </div>
@@ -548,8 +542,8 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
             </div>
 
             <button 
-              onClick={() => setView('preview')}
-              disabled={selectedIds.length === 0}
+              onClick={() => { if (namingPlan.error) alert(namingPlan.error); else setView('preview'); }}
+              disabled={selectedIds.length === 0 || busy || !!validateNamingRule(namingRule)}
               className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold text-sm hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-all disabled:opacity-50 disabled:shadow-none"
             >
               预览命名结果
@@ -564,19 +558,17 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-2">
-          <button onClick={() => setView('naming')} className="p-2 hover:bg-[var(--bg-secondary)] rounded-lg text-[var(--text-secondary)]">
+          <button disabled={busy} onClick={() => setView('naming')} className="p-2 hover:bg-[var(--bg-secondary)] rounded-lg text-[var(--text-secondary)]">
             <ArrowLeft className="w-5 h-5" />
           </button>
           <h2 className="text-2xl font-bold text-[var(--text-primary)]">命名预览</h2>
         </div>
         <button 
-          onClick={() => {
-            setResults(previewResults);
-            setView('result');
-          }}
+          onClick={executeNaming}
+          disabled={busy}
           className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-all"
         >
-          执行命名
+          {busy ? '正在处理…' : '执行命名'}
         </button>
       </div>
 
@@ -631,7 +623,7 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
           >
             返回列表
           </button>
-          <button className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/20 flex items-center">
+          <button onClick={() => { if (archive) downloadBlob(archive, '批量命名结果.zip'); }} disabled={!archive} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 shadow-lg shadow-blue-500/20 flex items-center">
             <Download className="w-4 h-4 mr-2" /> 导出结果
           </button>
         </div>
@@ -643,7 +635,7 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
           <CheckCircle2 className="w-10 h-10" />
         </div>
         <div>
-          <h3 className="text-xl font-bold text-[var(--text-primary)]">批量命名执行成功</h3>
+          <h3 className="text-xl font-bold text-[var(--text-primary)]">批量命名已完成，点击导出结果下载图片</h3>
           <p className="text-sm text-[var(--text-secondary)] mt-1">
             共处理 {results.length} 个文件，成功 {results.filter(r => r.status === 'success' && r.newName !== '(已跳过)').length} 个，跳过 {results.filter(r => r.newName === '(已跳过)').length} 个，失败 0 个
           </p>
@@ -698,6 +690,7 @@ export default function DataProcessing({ activeSubTab }: DataProcessingProps) {
     <div className="h-full">
       <AnimatePresence mode="wait">
         <motion.div
+          inert={busy}
           key={`${activeSubTab}-${view}`}
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}

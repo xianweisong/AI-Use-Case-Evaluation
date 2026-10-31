@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useNavigationReset } from '../lib/useNavigationReset';
 import { 
   BarChart3,
   Search, 
@@ -36,6 +37,16 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { buildAnnotationEntries, editorSize, selectDatasetImages, createLocalId, restoreLocalSource } from '../lib/annotationExport';
+import { createZip, downloadBlob } from '../lib/zip';
+
+const readImageDimensions = (blob: Blob): Promise<{ width: number; height: number }> => new Promise((resolve, reject) => {
+  const url = URL.createObjectURL(blob);
+  const image = new Image();
+  image.onload = () => { URL.revokeObjectURL(url); resolve({ width: image.naturalWidth, height: image.naturalHeight }); };
+  image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片无法解码，请重新导入有效图片')); };
+  image.src = url;
+});
 
 const DB_NAME = 'DataAnnotationDB';
 const STORE_NAME = 'files';
@@ -63,6 +74,8 @@ const getIndexedDBFile = async (key: string): Promise<any> => {
     const db = await getDB();
     return new Promise((resolve) => {
       const transaction = db.transaction(STORE_NAME, 'readonly');
+      transaction.oncomplete = () => db.close();
+      transaction.onabort = () => { db.close(); resolve(null); };
       const store = transaction.objectStore(STORE_NAME);
       const request = store.get(key);
       request.onsuccess = () => {
@@ -80,21 +93,34 @@ const getIndexedDBFile = async (key: string): Promise<any> => {
 
 const saveIndexedDBFile = async (key: string, value: any): Promise<void> => {
   try {
+    const persistentValue = typeof value === 'string' && value.startsWith('blob:')
+      ? await fetch(value).then(response => response.blob()) : value;
     const db = await getDB();
     return new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(STORE_NAME, 'readwrite');
       const store = transaction.objectStore(STORE_NAME);
-      const request = store.put(value, key);
-      request.onsuccess = () => resolve();
+      const request = store.put(persistentValue, key);
+      transaction.oncomplete = () => { db.close(); resolve(); };
+      transaction.onabort = () => { db.close(); reject(transaction.error); };
+      transaction.onerror = () => reject(transaction.error);
       request.onerror = () => reject(request.error);
     });
   } catch (err) {
     console.error('IndexedDB save error:', err);
+    throw err;
   }
 };
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+async function persistUploadedImage(file: File, taskId: string) {
+  if (!file.type.startsWith('image/')) throw new Error('请导入有效图片文件');
+  const size = await readImageDimensions(file);
+  const id = createLocalId();
+  await saveIndexedDBFile(`file_url_${id}`, file);
+  return { id, taskId, name: file.name, status: 'pending', url: URL.createObjectURL(file), ...size };
 }
 
 interface DataAnnotationProps {
@@ -133,6 +159,7 @@ interface ExportRecord {
 
 export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   const [view, setView] = useState<AnnotationView>('list');
+  useNavigationReset(() => setView('list'));
   
   const [confirmState, setConfirmState] = useState<{
     open: boolean;
@@ -210,100 +237,19 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   };
 
   // State Definitions with Persistence
-  const [imageTasks, setImageTasks] = useState(() => getSavedData(STORAGE_KEYS.IMAGE_TASKS, [
-    { id: 'IMG-TASK-001', name: '人脸识别评测集', total: 5, completed: 3, status: 'annotating', time: '2026-03-01 10:00' },
-    { id: 'IMG-TASK-002', name: '车辆特征库', total: 3, completed: 3, status: 'completed', time: '2026-03-01 10:05' },
-    { id: 'IMG-TASK-003', name: '行人属性标注', total: 3, completed: 0, status: 'pending', time: '2026-03-01 10:10' },
-  ]));
+  const [imageTasks, setImageTasks] = useState<any[]>(() => getSavedData<any[]>(STORAGE_KEYS.IMAGE_TASKS, []));
 
-  const [videoTasks, setVideoTasks] = useState(() => getSavedData(STORAGE_KEYS.VIDEO_TASKS, [
-    { id: 'VID-TASK-001', name: '交通违法行为识别', total: 3, completed: 1, status: 'annotating', extractStatus: 'partial', time: '2026-03-01 09:00' },
-    { id: 'VID-TASK-002', name: '安防监控异常检测', total: 2, completed: 2, status: 'completed', extractStatus: 'completed', time: '2026-03-01 11:15' },
-  ]));
+  const [videoTasks, setVideoTasks] = useState<any[]>(() => getSavedData<any[]>(STORAGE_KEYS.VIDEO_TASKS, []));
 
-  const [datasets, setDatasets] = useState<Dataset[]>(() => getSavedData(STORAGE_KEYS.DATASETS, [
-    { id: 'DS-001', name: '标准人脸库-V1', type: 'image', taskIds: ['IMG-TASK-001'], createdAt: '2026-02-15', dataCount: 5 },
-    { id: 'DS-002', name: '城市交通监控-夜间', type: 'video', taskIds: ['VID-TASK-001'], createdAt: '2026-02-20', dataCount: 3 },
-    { id: 'DS-003', name: '违停车辆抓拍集', type: 'image', taskIds: ['IMG-TASK-002'], createdAt: '2026-03-01', dataCount: 3 },
-    { id: 'DS-004', name: '安防监控异常检测集', type: 'video', taskIds: ['VID-TASK-002'], createdAt: '2026-03-02', dataCount: 2 },
-  ]));
+  const [datasets, setDatasets] = useState<Dataset[]>(() => getSavedData<Dataset[]>(STORAGE_KEYS.DATASETS, []));
 
-  const [exportHistory, setExportHistory] = useState<ExportRecord[]>(() => getSavedData(STORAGE_KEYS.EXPORT_HISTORY, [
-    { id: 'EXP-001', datasetName: '标准人脸库-V1', format: 'COCO', status: 'completed', time: '2026-03-03 10:00', downloadUrl: '#' },
-    { id: 'EXP-002', datasetName: '违停车辆抓拍集', format: 'YOLO', status: 'processing', time: '2026-03-03 11:30' },
-  ]));
+  const [exportHistory, setExportHistory] = useState<ExportRecord[]>(() => getSavedData<ExportRecord[]>(STORAGE_KEYS.EXPORT_HISTORY, []));
 
-  const [imageFiles, setImageFiles] = useState(() => {
-    const raw = getSavedData(STORAGE_KEYS.IMAGE_FILES, []);
-    if (raw.length === 0 || raw.some((f: any) => !f.taskId)) {
-      return [
-        { id: 101, taskId: 'IMG-TASK-001', name: 'face_detection_001.jpg', status: 'completed' },
-        { id: 102, taskId: 'IMG-TASK-001', name: 'face_detection_002.jpg', status: 'completed' },
-        { id: 103, taskId: 'IMG-TASK-001', name: 'face_detection_003.jpg', status: 'completed' },
-        { id: 104, taskId: 'IMG-TASK-001', name: 'passenger_face_004.jpg', status: 'pending' },
-        { id: 105, taskId: 'IMG-TASK-001', name: 'driver_face_005.jpg', status: 'pending' },
-        
-        { id: 201, taskId: 'IMG-TASK-002', name: 'sedan_red_001.jpg', status: 'completed' },
-        { id: 202, taskId: 'IMG-TASK-002', name: 'suv_black_002.jpg', status: 'completed' },
-        { id: 203, taskId: 'IMG-TASK-002', name: 'truck_white_003.jpg', status: 'completed' },
-        
-        { id: 301, taskId: 'IMG-TASK-003', name: 'pedestrian_street_001.jpg', status: 'pending' },
-        { id: 302, taskId: 'IMG-TASK-003', name: 'pedestrian_crossing_002.jpg', status: 'pending' },
-        { id: 303, taskId: 'IMG-TASK-003', name: 'pedestrian_mall_003.jpg', status: 'pending' },
-      ];
-    }
-    return raw;
-  });
-
-  const [videoFiles, setVideoFiles] = useState(() => {
-    const raw = getSavedData(STORAGE_KEYS.VIDEO_FILES, []);
-    if (raw.length === 0) {
-      return [
-        { id: 1, taskId: 'VID-TASK-001', name: 'VIDEO_001.mp4', status: 'completed', extractStatus: 'ready', strategy: 'fps', fps: 5, totalFrames: 12 },
-        { id: 2, taskId: 'VID-TASK-001', name: 'VIDEO_002.mp4', status: 'pending', extractStatus: 'pending', strategy: null, totalFrames: 0 },
-        { id: 3, taskId: 'VID-TASK-001', name: 'VIDEO_003.mp4', status: 'pending', extractStatus: 'extracting', strategy: 'interval', interval: 10, totalFrames: 15 },
-        { id: 4, taskId: 'VID-TASK-002', name: 'MONITOR_001.mp4', status: 'completed', extractStatus: 'ready', strategy: 'fps', fps: 10, totalFrames: 18 },
-        { id: 5, taskId: 'VID-TASK-002', name: 'MONITOR_002.mp4', status: 'completed', extractStatus: 'ready', strategy: 'total', total: 10, totalFrames: 10 },
-      ];
-    }
-    return raw;
-  });
-
+  const [imageFiles, setImageFiles] = useState<any[]>(() => getSavedData<any[]>(STORAGE_KEYS.IMAGE_FILES, []).filter(file => file.taskId));
+  const [videoFiles, setVideoFiles] = useState<any[]>(() => getSavedData<any[]>(STORAGE_KEYS.VIDEO_FILES, []).filter(file => file.taskId));
+  const [restoringSources, setRestoringSources] = useState(true);
   const [annotations, setAnnotations] = useState<Record<string, Rect[]>>(() => {
-    const defaultAnnotations = {
-      'img_101': [
-        { id: '101-1', x: 100, y: 150, width: 200, height: 150, label: '人脸', color: '#3b82f6' },
-      ],
-      'img_102': [
-        { id: '102-1', x: 200, y: 100, width: 150, height: 180, label: '车辆', color: '#10b981' },
-      ],
-      'img_103': [
-        { id: '103-1', x: 150, y: 220, width: 180, height: 120, label: '车牌', color: '#f59e0b' },
-      ],
-      'img_201': [
-        { id: '201-1', x: 50, y: 80, width: 300, height: 250, label: '车辆', color: '#10b981' },
-      ],
-      'img_202': [
-        { id: '202-1', x: 120, y: 150, width: 220, height: 170, label: '行人', color: '#ef4444' },
-      ],
-      'img_203': [
-        { id: '203-1', x: 180, y: 200, width: 140, height: 110, label: '车牌', color: '#f59e0b' },
-      ],
-      'vid_1_0': [
-        { id: 'vid1-1', x: 100, y: 120, width: 250, height: 180, label: '车辆', color: '#10b981' },
-      ],
-      'vid_4_0': [
-        { id: 'vid4-1', x: 120, y: 140, width: 200, height: 150, label: '车辆', color: '#10b981' },
-      ],
-      'vid_5_0': [
-        { id: 'vid5-1', x: 150, y: 110, width: 220, height: 160, label: '行人', color: '#ef4444' },
-      ]
-    };
-    const saved = getSavedData<Record<string, Rect[]> | null>(STORAGE_KEYS.ANNOTATIONS, null);
-    if (!saved || Object.keys(saved).length === 0) {
-      return defaultAnnotations;
-    }
-    return saved;
+    return getSavedData<Record<string, Rect[]>>(STORAGE_KEYS.ANNOTATIONS, {});
   });
 
   const [labels, setLabels] = useState(() => getSavedData(STORAGE_KEYS.LABELS, [
@@ -349,7 +295,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   useEffect(() => {
     try {
       const sanitized = imageFiles.map((f: any) => {
-        if (f.url && f.url.startsWith('data:')) {
+        if (f.url && (f.url.startsWith('data:') || f.url.startsWith('blob:'))) {
           const { url, ...rest } = f;
           return rest;
         }
@@ -358,13 +304,14 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
       localStorage.setItem(STORAGE_KEYS.IMAGE_FILES, JSON.stringify(sanitized));
     } catch (e) {
       console.warn('Failed to save image files to localStorage (possibly due to base64 size limit)', e);
+      showAlert('本机保存失败', '图片清单无法保存，刷新后可能丢失。请保留原文件并检查浏览器存储空间。');
     }
   }, [imageFiles]);
 
   useEffect(() => {
     try {
       const sanitized = videoFiles.map((f: any) => {
-        if (f.url && f.url.startsWith('data:')) {
+        if (f.url && (f.url.startsWith('data:') || f.url.startsWith('blob:'))) {
           const { url, ...rest } = f;
           return rest;
         }
@@ -376,55 +323,25 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     }
   }, [videoFiles]);
 
-  // Load saved large URL files on mount from IndexedDB
+  // Object URLs expire across reloads; restore actual persisted Blob/data URL content.
   useEffect(() => {
-    const loadSavedLargeFiles = async () => {
-      try {
-        setImageFiles(prev => {
-          Promise.all(
-            prev.map(async (f: any) => {
-              if (!f.url) {
-                const savedUrl = await getIndexedDBFile(`file_url_${f.id}`);
-                if (savedUrl) {
-                  return { ...f, url: savedUrl };
-                }
-              }
-              return f;
-            })
-          ).then(loadedImageFiles => {
-            const hasChanges = loadedImageFiles.some((f, i) => f.url !== prev[i]?.url);
-            if (hasChanges) {
-              setImageFiles(loadedImageFiles);
-            }
-          });
-          return prev;
-        });
-
-        setVideoFiles(prev => {
-          Promise.all(
-            prev.map(async (f: any) => {
-              if (!f.url) {
-                const savedUrl = await getIndexedDBFile(`file_url_${f.id}`);
-                if (savedUrl) {
-                  return { ...f, url: savedUrl };
-                }
-              }
-              return f;
-            })
-          ).then(loadedVideoFiles => {
-            const hasChanges = loadedVideoFiles.some((f, i) => f.url !== prev[i]?.url);
-            if (hasChanges) {
-              setVideoFiles(loadedVideoFiles);
-            }
-          });
-          return prev;
-        });
-      } catch (err) {
-        console.error('Failed to restore large file URLs from IndexedDB', err);
-      }
+    let cancelled = false;
+    const urls: string[] = [];
+    const restore = async (files: any[], update: (fn: (current: any[]) => any[]) => void) => {
+      const restored = await Promise.all(files.map(async file => {
+        const saved = await getIndexedDBFile(`file_url_${file.id}`);
+        const { url, temporary } = restoreLocalSource(saved, file.url);
+        if (temporary) { if (cancelled) URL.revokeObjectURL(url); else urls.push(url); }
+        return { id: file.id, url };
+      }));
+      if (!cancelled) update(current => current.map(file => {
+        const item = restored.find(item => item.id === file.id);
+        return item ? { ...file, url: item.url } : file;
+      }));
     };
-    
-    loadSavedLargeFiles();
+    void Promise.all([restore(imageFiles, setImageFiles), restore(videoFiles, setVideoFiles)])
+      .finally(() => { if (!cancelled) setRestoringSources(false); });
+    return () => { cancelled = true; urls.forEach(url => URL.revokeObjectURL(url)); };
   }, []);
 
   useEffect(() => {
@@ -432,6 +349,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
       localStorage.setItem(STORAGE_KEYS.ANNOTATIONS, JSON.stringify(annotations));
     } catch (e) {
       console.warn('Failed to save annotations to localStorage', e);
+      showAlert('标注未能保存', '浏览器存储不可用，当前标注尚未持久保存。请先导出备份并检查存储空间。');
     }
   }, [annotations]);
 
@@ -487,6 +405,9 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
 
   const [datasetModalConfig, setDatasetModalConfig] = useState<{ open: boolean; dataset?: Dataset }>({ open: false });
   const [exportDatasetModalConfig, setExportDatasetModalConfig] = useState<{ open: boolean; datasets: Dataset[] }>({ open: false, datasets: [] });
+  const [exporting, setExporting] = useState(false);
+  const [exportFormat, setExportFormat] = useState('COCO');
+  const [exportIncludeImages, setExportIncludeImages] = useState(true);
 
   const [importModalConfig, setImportModalConfig] = useState<{ open: boolean; type?: 'image' | 'video' }>({ open: false });
   const [statsModalConfig, setStatsModalConfig] = useState<{ open: boolean; task?: any }>({ open: false });
@@ -572,6 +493,8 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
 
+  useEffect(() => { setCurrentImageIndex(0); setCurrentFrameIndex(0); setSelectedRectId(null); }, [selectedItem?.id]);
+
   const activeImageFile = currentImageFiles[currentImageIndex];
   const currentKey = view === 'imageEditor' 
     ? (activeImageFile ? `img_${activeImageFile.id}` : '') 
@@ -617,39 +540,36 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   const [isPanning, setIsPanning] = useState(false);
   const [panStart, setPanStart] = useState({ x: 0, y: 0 });
   const [imageSize, setImageSize] = useState({ width: 800, height: 600 });
+  const [loadedImage, setLoadedImage] = useState<{ id: string | number; url: string } | null>(null);
 
   useEffect(() => {
     setPanOffset({ x: 0, y: 0 });
     setZoom(100);
     setSelectedRectId(null);
+    setLoadedImage(null);
     if (!activeImageFile) return;
-    const imgUrl = activeImageFile.url || `https://picsum.photos/seed/${activeImageFile.id}/800/600`;
+    const imgUrl = activeImageFile.url;
+    if (!imgUrl) {
+      setImageSize({ width: 800, height: 600 });
+      if (!restoringSources) showAlert('原始图片缺失', '未找到已保存的原始图片，请重新导入原文件；现有标注未删除。');
+      return;
+    }
     const img = new Image();
-    img.src = imgUrl;
     img.onload = () => {
-      const maxWidth = 800;
-      const maxHeight = 600;
-      let w = img.naturalWidth;
-      let h = img.naturalHeight;
-      if (!w || !h) {
-        setImageSize({ width: 800, height: 600 });
-        return;
+      try {
+        setImageSize(editorSize(img.naturalWidth, img.naturalHeight));
+        setLoadedImage({ id: activeImageFile.id, url: imgUrl });
+      } catch {
+        showAlert('图片不可用', '无法读取原图尺寸，请重新导入图片。');
       }
-      const ratio = w / h;
-      if (w > maxWidth) {
-        w = maxWidth;
-        h = w / ratio;
-      }
-      if (h > maxHeight) {
-        h = maxHeight;
-        w = h * ratio;
-      }
-      setImageSize({ width: Math.round(w), height: Math.round(h) });
     };
     img.onerror = () => {
       setImageSize({ width: 800, height: 600 });
+      showAlert('原始图片不可用', '图片内容或本次会话链接已失效，请重新导入原文件；现有标注未删除。');
     };
-  }, [activeImageFile]);
+    img.src = imgUrl;
+    return () => { img.onload = null; img.onerror = null; };
+  }, [activeImageFile?.id, activeImageFile?.url, restoringSources]);
 
   const [activeLabel, setActiveLabel] = useState('人脸');
   const [isDrawing, setIsDrawing] = useState(false);
@@ -659,6 +579,10 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   const [newLabelName, setNewLabelName] = useState('');
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if ((view === 'imageEditor' && (!activeImageFile?.url || loadedImage?.id !== activeImageFile.id || loadedImage.url !== activeImageFile.url)) || view === 'videoEditor') {
+      showAlert('原始内容不可用', '请等待真实图片加载完成或重新导入原文件；视频抽帧尚未接入。');
+      return;
+    }
     if (tool === 'select') {
       const target = e.target as HTMLElement;
       if (target.closest('button')) return;
@@ -1173,32 +1097,13 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
               input.accept = 'image/*';
               input.multiple = true;
               input.onchange = (e: any) => {
-                const files = Array.from(e.target.files);
+                const files = Array.from(e.target.files as FileList);
                 if (files.length > 0) {
-                  const promises = files.map((file: any, idx) => {
-                    return new Promise<any>((resolve) => {
-                      const reader = new FileReader();
-                      reader.onloadend = () => {
-                        const fileId = Date.now() + idx + Math.floor(Math.random() * 1000);
-                        const url = reader.result;
-                        if (url) {
-                          saveIndexedDBFile(`file_url_${fileId}`, url);
-                        }
-                        resolve({
-                          id: fileId,
-                          taskId: selectedItem?.id,
-                          name: file.name,
-                          status: 'pending',
-                          url
-                        });
-                      };
-                      reader.readAsDataURL(file);
-                    });
-                  });
-                  Promise.all(promises).then((newFiles) => {
+                  Promise.all(files.map(file => persistUploadedImage(file, selectedItem.id))).then(newFiles => {
                     setImageFiles(prev => [...prev, ...newFiles]);
                     showAlert('导入成功', `成功导入 ${newFiles.length} 张图片`);
-                  });
+                  }).catch(error => showAlert('导入失败', error instanceof Error ? error.message : '图片保存失败'));
+
                 }
               };
               input.click();
@@ -1238,7 +1143,11 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
           </button>
           <button 
             onClick={() => {
-              showAlert('保存成功', '标注已保存成功');
+              try {
+                if (!activeImageFile?.url) throw new Error('请先导入真实图片');
+                localStorage.setItem(STORAGE_KEYS.ANNOTATIONS, JSON.stringify(annotations));
+                showAlert('保存成功', '当前标注已保存至本机浏览器');
+              } catch (error) { showAlert('保存失败', error instanceof Error ? error.message : '浏览器存储不可用'); }
             }}
             className="flex items-center px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
           >
@@ -1262,23 +1171,10 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                 input.onchange = (e: any) => {
                   const file = e.target.files[0];
                   if (file) {
-                    const reader = new FileReader();
-                    reader.onloadend = () => {
-                      const fileId = Date.now();
-                      const url = reader.result;
-                      if (url) {
-                        saveIndexedDBFile(`file_url_${fileId}`, url);
-                      }
-                      const newFile = { 
-                        id: fileId, 
-                        taskId: selectedItem?.id, 
-                        name: file.name, 
-                        status: 'pending',
-                        url
-                      };
-                      setImageFiles((prev: any) => [...prev, newFile]);
-                    };
-                    reader.readAsDataURL(file);
+                    void persistUploadedImage(file, selectedItem.id).then(newFile => {
+                      setImageFiles(prev => [...prev, newFile]);
+                    }).catch(error => showAlert('导入失败', error instanceof Error ? error.message : '图片保存失败'));
+
                   }
                 };
                 input.click();
@@ -1300,7 +1196,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                 )}
               >
                 <div className="aspect-video rounded bg-slate-200 dark:bg-slate-800 mb-2 overflow-hidden">
-                  <img src={file.url || `https://picsum.photos/seed/${file.id}/200/120`} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  <img src={file.url} alt={file.url ? '' : '原文件待导入'} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                 </div>
                 <div className="flex items-center justify-between text-[var(--text-primary)]">
                   <span className="text-xs truncate font-medium max-w-[120px]">{file.name}</span>
@@ -1356,7 +1252,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
               height: `${imageSize.height}px`, 
               transform: `translate(calc(-50% + ${panOffset.x}px), calc(-50% + ${panOffset.y}px)) scale(${zoom / 100})`,
               transformOrigin: 'center center',
-              backgroundImage: activeImageFile ? (activeImageFile.url ? `url(${activeImageFile.url})` : `url(https://picsum.photos/seed/${activeImageFile.id}/800/600)`) : 'none',
+              backgroundImage: activeImageFile?.url ? `url(${activeImageFile.url})` : 'none',
               backgroundSize: 'contain',
               backgroundPosition: 'center',
               backgroundRepeat: 'no-repeat'
@@ -1614,7 +1510,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   );
 
   const renderVideoEditor = () => {
-    const totalFrames = selectedVideo?.totalFrames || 100;
+    const totalFrames = selectedVideo?.totalFrames || 0;
     
     return (
       <div className="h-full flex flex-col -m-6">
@@ -1664,8 +1560,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
             </button>
             <button 
               onClick={() => {
-                setVideoFiles(prev => prev.map(f => f.id === selectedVideo.id ? { ...f, status: 'completed' } : f));
-                showAlert('保存成功', '标注已保存成功');
+                showAlert('暂不支持', '真实视频帧尚未接入，不能保存或标记视频标注完成。');
               }}
               className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
             >
@@ -1693,7 +1588,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                   )}
                 >
                   <div className="w-16 aspect-video rounded bg-slate-200 dark:bg-slate-800 overflow-hidden shrink-0">
-                    <img src={`https://picsum.photos/seed/vid-${selectedVideo?.id}-frame-${idx}/160/90`} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    <img alt="真实视频帧待接入" className="w-full h-full object-cover" />
                   </div>
                   <div className="flex flex-col min-w-0">
                     <span className="text-[10px] font-bold text-blue-500">Frame {idx + 1}</span>
@@ -1719,7 +1614,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                   width: '800px', 
                   height: '600px', 
                   transform: `scale(${zoom / 100})`,
-                  backgroundImage: `url(https://picsum.photos/seed/vid-${selectedVideo?.id}-frame-${currentFrameIndex}/800/600)`,
+                  backgroundImage: 'none',
                   backgroundSize: 'cover'
                 }}
               >
@@ -1959,7 +1854,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                       )}
                       {file.extractStatus === 'ready' && (
                         <button 
-                          onClick={() => { setSelectedVideo(file); setView('videoEditor'); }}
+                          onClick={() => showAlert('视频标注尚未接入', '真实视频解码与抽帧服务尚未接入，不能使用占位图片进行标注。')}
                           className="text-xs font-medium text-emerald-500 hover:text-emerald-600"
                         >
                           开始标注
@@ -2001,8 +1896,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   );
 
   const isDatasetExportable = (dataset: Dataset) => {
-    const associatedTasks = [...imageTasks, ...videoTasks].filter(t => dataset.taskIds.includes(t.id));
-    return associatedTasks.length > 0 && associatedTasks.every(t => t.status === 'completed');
+    return dataset.type === 'image' && imageFiles.some((file: any) => dataset.taskIds.includes(file.taskId));
   };
 
   const renderDatasetMgmt = () => (
@@ -2041,7 +1935,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                 const selectedDatasets = datasets.filter(ds => selectedDatasetIds.includes(ds.id));
                 const exportable = selectedDatasets.filter(isDatasetExportable);
                 if (exportable.length < selectedDatasets.length) {
-                  showAlert('部分数据集无法导出', '部分选中的数据集有关联任务未完成，无法导出');
+                  showAlert('部分数据集无法导出', '部分数据集没有关联图片，或属于尚未接入抽帧的视频类型');
                 }
                 if (exportable.length > 0) {
                   setExportDatasetModalConfig({ open: true, datasets: exportable });
@@ -2165,7 +2059,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                           "text-xs font-medium transition-colors",
                           exportable ? "text-blue-500 hover:text-blue-600" : "text-slate-300 cursor-not-allowed"
                         )}
-                        title={exportable ? "导出标注成果" : "有关联任务未完成，无法导出"}
+                        title={exportable ? "导出标注成果" : "没有关联图片或视频抽帧尚未接入"}
                       >
                         导出
                       </button>
@@ -2222,15 +2116,25 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     const handleSubmit = (e: React.FormEvent) => {
       e.preventDefault();
       if (config.dataset) {
+        if (config.dataset.taskIds.length && type !== config.dataset.type) {
+          showAlert('类型不可修改', '已关联任务的数据集不能改变图片/视频类型。');
+          return;
+        }
         setDatasets(prev => prev.map(ds => ds.id === config.dataset.id ? { ...ds, name, type } : ds));
         showAlert('更新成功', '数据集更新成功');
         onClose();
       } else {
-        const newDsId = `DS-${Math.floor(Math.random() * 1000)}`;
+        if (!files.length || files.some(file => !file.type.startsWith(type === 'image' ? 'image/' : 'video/'))) {
+          showAlert('文件不可用', '请上传对应类型的真实图片或视频，当前不支持压缩包解包。');
+          return;
+        }
+        const newDsId = `DS-${createLocalId()}`;
         const readFilesPromises = files.map((file, idx) => {
-          return new Promise<any>((resolve) => {
+          return new Promise<any>((resolve, reject) => {
             const reader = new FileReader();
-            reader.onloadend = () => {
+            reader.onerror = () => reject(new Error(`无法读取文件：${file.name}`));
+            reader.onabort = () => reject(new Error(`文件读取已取消：${file.name}`));
+            reader.onload = () => {
               resolve({
                 name: file.name,
                 url: reader.result
@@ -2246,6 +2150,8 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
               await saveIndexedDBFile(`dataset_loaded_files_${newDsId}`, readFiles);
             } catch (err) {
               console.error('Failed to save source files to IndexedDB due to limits:', err);
+              showAlert('保存失败', '原始文件未成功保存，请检查浏览器存储空间后重试。');
+              return;
             }
           }
 
@@ -2255,12 +2161,12 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
             type,
             taskIds: [],
             createdAt: new Date().toISOString().split('T')[0],
-            dataCount: files.length || Math.floor(Math.random() * 5) + 3
+            dataCount: files.length
           };
           setDatasets([newDs, ...datasets]);
           showAlert('创建成功', `数据集创建成功，共包含 ${newDs.dataCount} 个文件`);
           onClose();
-        });
+        }).catch(error => showAlert('创建失败', error instanceof Error ? error.message : '原始文件无法读取'));
       }
     };
 
@@ -2331,13 +2237,13 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                         }
                       }}
                       className="hidden"
-                      accept={type === 'image' ? "image/*,.zip,.tar" : "video/*,.zip,.tar"}
+                      accept={type === 'image' ? "image/*" : "video/*"}
                     />
                     <div className="w-12 h-12 bg-blue-100 dark:bg-blue-900/30 text-blue-600 rounded-full flex items-center justify-center mb-4">
                       <Upload className="w-6 h-6" />
                     </div>
                     <p className="text-sm font-medium">点击或拖拽文件到此处上传</p>
-                    <p className="text-xs text-[var(--text-secondary)] mt-1">支持图片/视频文件或压缩包</p>
+                    <p className="text-xs text-[var(--text-secondary)] mt-1">支持真实图片/视频文件，暂不支持压缩包</p>
                     
                     {files.length > 0 && (
                       <div className="mt-4 w-full bg-[var(--bg-primary)] rounded-lg p-3 border border-[var(--border-color)]" onClick={(e) => e.stopPropagation()}>
@@ -2374,146 +2280,47 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   };
 
   const ExportDatasetModal = ({ config, onClose }: { config: any; onClose: () => void }) => {
-    const [format, setFormat] = useState('COCO');
-    const [includeImages, setIncludeImages] = useState(true);
+    const format = exportFormat;
+    const setFormat = setExportFormat;
+    const includeImages = exportIncludeImages;
+    const setIncludeImages = setExportIncludeImages;
 
-    const handleExport = () => {
-      config.datasets.forEach((ds: Dataset) => {
-        const newRecord: ExportRecord = {
-          id: `EXP-${Math.floor(Math.random() * 10000)}`,
-          datasetName: ds.name,
-          format,
-          status: 'processing',
-          time: new Date().toISOString().split('T')[0] + ' ' + new Date().toTimeString().split(' ')[0].slice(0, 5)
-        };
-        setExportHistory(prev => [newRecord, ...prev]);
-
-        // Generate and trigger download with enriched standard formats
-        let annotationContent = '';
-        if (format === 'YOLO') {
-          annotationContent = `# Standard YOLO format: <class_id> <x_center> <y_center> <width> <height>
-# Exported from AI Scenario Evaluation Platform
-# Dataset: ${ds.name}
-# Classes: 0: person, 1: car, 2: bicycle, 3: dog
-0 0.4521 0.5214 0.2110 0.3520
-1 0.1245 0.4512 0.0820 0.1240
-0 0.7841 0.6120 0.1540 0.4210
-2 0.3210 0.8540 0.1200 0.0850
-3 0.6540 0.2140 0.1850 0.2450
-1 0.8540 0.1240 0.1420 0.0850`;
-        } else if (format === 'Pascal VOC') {
-          annotationContent = `<?xml version="1.0" encoding="UTF-8"?>
-<annotation>
-  <folder>VOC_EXPORT_${new Date().getFullYear()}</folder>
-  <filename>${ds.name}_001.jpg</filename>
-  <path>/datasets/${ds.name}/images/${ds.name}_001.jpg</path>
-  <source>
-    <database>AI Scenario Evaluation Platform (v2.4.0)</database>
-    <annotation>PASCAL VOC2007</annotation>
-    <image>custom_capture</image>
-    <flickrid>0</flickrid>
-  </source>
-  <owner>
-    <flickrid>admin</flickrid>
-    <name>AI_Platform_Service</name>
-  </owner>
-  <size>
-    <width>1920</width>
-    <height>1080</height>
-    <depth>3</depth>
-  </size>
-  <segmented>0</segmented>
-  <object>
-    <name>person</name>
-    <pose>Unspecified</pose>
-    <truncated>0</truncated>
-    <difficult>0</difficult>
-    <occluded>0</occluded>
-    <bndbox>
-      <xmin>450</xmin>
-      <ymin>320</ymin>
-      <xmax>850</xmax>
-      <ymax>920</ymax>
-    </bndbox>
-  </object>
-  <object>
-    <name>car</name>
-    <pose>Rear</pose>
-    <truncated>1</truncated>
-    <difficult>0</difficult>
-    <occluded>1</occluded>
-    <bndbox>
-      <xmin>120</xmin>
-      <ymin>600</ymin>
-      <xmax>420</xmax>
-      <ymax>850</ymax>
-    </bndbox>
-  </object>
-  <object>
-    <name>bicycle</name>
-    <pose>Left</pose>
-    <truncated>0</truncated>
-    <difficult>1</difficult>
-    <occluded>0</occluded>
-    <bndbox>
-      <xmin>900</xmin>
-      <ymin>750</ymin>
-      <xmax>1150</xmax>
-      <ymax>980</ymax>
-    </bndbox>
-  </object>
-</annotation>`;
-        } else {
-          // Comprehensive COCO JSON
-          const cocoData = {
-            info: {
-              year: new Date().getFullYear(),
-              version: "2.1",
-              description: `Full export of dataset: ${ds.name}`,
-              contributor: "Public Security AI Research Institute",
-              url: "https://ais-platform.gov.cn",
-              date_created: new Date().toISOString()
-            },
-            licenses: [
-              { id: 1, name: "Attribution-NonCommercial-ShareAlike License", url: "http://creativecommons.org/licenses/by-nc-sa/2.0/" }
-            ],
-            images: [
-              { id: 1, width: 1920, height: 1080, file_name: `${ds.name}_001.jpg`, license: 1, date_captured: "2026-01-15 10:20:30" },
-              { id: 2, width: 1920, height: 1080, file_name: `${ds.name}_002.jpg`, license: 1, date_captured: "2026-01-15 10:21:45" },
-              { id: 3, width: 1280, height: 720, file_name: `${ds.name}_003.jpg`, license: 1, date_captured: "2026-01-15 10:25:12" }
-            ],
-            annotations: [
-              { id: 1, image_id: 1, category_id: 1, segmentation: [[450,320, 850,320, 850,920, 450,920]], area: 240000, bbox: [450, 320, 400, 600], iscrowd: 0 },
-              { id: 2, image_id: 1, category_id: 2, segmentation: [[120,600, 420,600, 420,850, 120,850]], area: 75000, bbox: [120, 600, 300, 250], iscrowd: 0 },
-              { id: 3, image_id: 2, category_id: 1, segmentation: [[1000,200, 1200,200, 1200,500, 1000,500]], area: 60000, bbox: [1000, 200, 200, 300], iscrowd: 0 },
-              { id: 4, image_id: 3, category_id: 3, segmentation: [[300,400, 500,400, 500,600, 300,600]], area: 40000, bbox: [300, 400, 200, 200], iscrowd: 0 }
-            ],
-            categories: [
-              { id: 1, name: "person", supercategory: "human" },
-              { id: 2, name: "car", supercategory: "vehicle" },
-              { id: 3, name: "bicycle", supercategory: "vehicle" },
-              { id: 4, name: "dog", supercategory: "animal" }
-            ]
-          };
-          annotationContent = JSON.stringify(cocoData, null, 2);
+    const handleExport = async () => {
+      if (exporting) return;
+      if (!config.datasets.length) { showAlert('导出失败', '当前任务未关联数据集，请先建立关联。'); return; }
+      setExporting(true);
+      for (const ds of config.datasets as Dataset[]) {
+        const recordId = createLocalId();
+        setExportHistory(prev => [{ id: recordId, datasetName: ds.name, format, status: 'processing', time: new Date().toLocaleString() }, ...prev]);
+        try {
+          if (ds.type !== 'image') throw new Error('视频抽帧尚未接入，不能导出虚构帧标注');
+          const files = selectDatasetImages(imageFiles, ds.taskIds);
+          const images = await Promise.all(files.map(async (file: any) => {
+            const source = await getIndexedDBFile(`file_url_${file.id}`);
+            const url = source instanceof Blob ? URL.createObjectURL(source) : source || file.url;
+            if (!url || !/^(data:image\/|blob:)/.test(url)) throw new Error(`图片原文件缺失，请重新导入：${file.name}`);
+            try {
+              const response = await fetch(url);
+              if (!response.ok) throw new Error('图片读取失败');
+              const blob = await response.blob();
+              const size = await readImageDimensions(blob);
+              return { id: file.id, name: file.name, ...size, boxes: annotations[`img_${file.id}`] || [], data: includeImages ? new Uint8Array(await blob.arrayBuffer()) : undefined };
+            } finally { if (source instanceof Blob) URL.revokeObjectURL(url); }
+          }));
+          const entries = buildAnnotationEntries(images, labels.map((label: any) => label.name), format, includeImages);
+          const blob = createZip(entries);
+          await saveIndexedDBFile(`export_${recordId}`, blob);
+          downloadBlob(blob, `${ds.name.replace(/[\\/]/g, '_')}_${format.replace(/ /g, '_')}.zip`);
+          setExportHistory(prev => prev.map(record => record.id === recordId ? { ...record, status: 'completed' } : record));
+        } catch (error) {
+          setExportHistory(prev => prev.map(record => record.id === recordId ? { ...record, status: 'failed' } : record));
+          showAlert('导出失败', error instanceof Error ? error.message : '无法读取真实图片及标注');
+          setExporting(false);
+          return;
         }
-
-        const blob = new Blob([annotationContent], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `${ds.name}_${format.replace(' ', '_')}_export.${format === 'Pascal VOC' ? 'xml' : format === 'YOLO' ? 'txt' : 'json'}`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-
-        // Simulate completion in history
-        setTimeout(() => {
-          setExportHistory(prev => prev.map(r => r.id === newRecord.id ? { ...r, status: 'completed', downloadUrl: url } : r));
-        }, 1500);
-      });
-      showAlert('导出开始', '正在导出标注文件...');
+      }
+      setExporting(false);
+      showAlert('导出完成', '已根据真实图片及标注生成 ZIP 文件');
       onClose();
     };
 
@@ -2575,13 +2382,13 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
             <div className="bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-900/30 rounded-lg p-3 flex items-start">
               <AlertCircle className="w-4 h-4 text-amber-500 mr-2 shrink-0 mt-0.5" />
               <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                提示：导出大规模数据集可能需要较长时间，您可以在“导出历史记录”中查看进度并下载结果。
+                提示：逐图生成标注文件并打包下载；未标注图片也会生成空标注，缺少原文件时停止导出。
               </p>
             </div>
 
             <div className="pt-4 flex justify-end space-x-3">
               <button onClick={onClose} className="px-4 py-2 border border-[var(--border-color)] rounded-lg text-sm font-medium hover:bg-[var(--bg-primary)]">取消</button>
-              <button onClick={handleExport} className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-lg shadow-blue-500/20 flex items-center">
+              <button disabled={exporting} onClick={handleExport} className="px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-lg shadow-blue-500/20 flex items-center">
                 <Download className="w-4 h-4 mr-2" /> 开始导出
               </button>
             </div>
@@ -2603,7 +2410,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
       onImport({
         name: name || selectedDs?.name,
         datasetId: selectedDsId,
-        fileCount: selectedDs?.dataCount || 120
+        fileCount: selectedDs?.dataCount || 0
       });
       onClose();
     };
@@ -2703,12 +2510,9 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
   };
 
   const StatsModal = ({ task, onClose }: { task: any; onClose: () => void }) => {
-    const stats = [
-      { label: '人脸', count: 450, color: '#3b82f6' },
-      { label: '车辆', count: 280, color: '#10b981' },
-      { label: '车牌', count: 120, color: '#f59e0b' },
-      { label: '行人', count: 85, color: '#ef4444' },
-    ];
+    const taskImageIds = new Set(imageFiles.filter((file: any) => file.taskId === task?.id).map((file: any) => `img_${file.id}`));
+    const taskBoxes = Object.entries(annotations).filter(([key]) => taskImageIds.has(key)).flatMap(([, boxes]) => boxes);
+    const stats = labels.map(label => ({ label: label.name, color: label.color, count: taskBoxes.filter(box => box.label === label.name).length }));
 
     const totalAnnotations = stats.reduce((acc, curr) => acc + curr.count, 0);
 
@@ -2737,11 +2541,11 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
               </div>
               <div className="p-4 bg-[var(--bg-primary)] rounded-xl border border-[var(--border-color)] text-center">
                 <p className="text-xs text-[var(--text-secondary)] font-medium uppercase mb-1">已标注图片</p>
-                <p className="text-2xl font-bold text-emerald-500">{task?.completed || 420}</p>
+                <p className="text-2xl font-bold text-emerald-500">{task?.completed || 0}</p>
               </div>
               <div className="p-4 bg-[var(--bg-primary)] rounded-xl border border-[var(--border-color)] text-center">
                 <p className="text-xs text-[var(--text-secondary)] font-medium uppercase mb-1">标注进度</p>
-                <p className="text-2xl font-bold text-amber-500">{Math.round(((task?.completed || 420) / (task?.total || 500)) * 100)}%</p>
+                <p className="text-2xl font-bold text-amber-500">{task?.total ? Math.round(((task?.completed || 0) / task.total) * 100) : 0}%</p>
               </div>
             </div>
 
@@ -2752,12 +2556,12 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                   <div key={s.label} className="space-y-1">
                     <div className="flex justify-between text-xs mb-1">
                       <span className="font-medium">{s.label}</span>
-                      <span className="text-[var(--text-secondary)]">{s.count} ({Math.round((s.count / totalAnnotations) * 100)}%)</span>
+                      <span className="text-[var(--text-secondary)]">{s.count} ({totalAnnotations ? Math.round((s.count / totalAnnotations) * 100) : 0}%)</span>
                     </div>
                     <div className="h-2 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
                       <div 
                         className="h-full transition-all duration-500" 
-                        style={{ width: `${(s.count / totalAnnotations) * 100}%`, backgroundColor: s.color }} 
+                        style={{ width: `${totalAnnotations ? (s.count / totalAnnotations) * 100 : 0}%`, backgroundColor: s.color }}
                       />
                     </div>
                   </div>
@@ -2784,22 +2588,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
     const [value, setValue] = useState('5');
 
     const handleStart = () => {
-      setVideoFiles(prev => prev.map(f => f.id === video.id ? {
-        ...f,
-        extractStatus: 'extracting',
-        strategy,
-        [strategy === 'fps' ? 'fps' : strategy === 'interval' ? 'interval' : 'total']: parseInt(value)
-      } : f));
-      
-      // Simulate extraction completion
-      setTimeout(() => {
-        setVideoFiles(prev => prev.map(f => f.id === video.id ? {
-          ...f,
-          extractStatus: 'ready',
-          totalFrames: strategy === 'total' ? parseInt(value) : 120
-        } : f));
-      }, 3000);
-      
+      showAlert('抽帧尚未接入', '当前未接入真实视频解码与抽帧服务，不能生成视频帧。请使用图片数据集进行真实标注。');
       onClose();
     };
 
@@ -2850,7 +2639,7 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
             <div className="bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-900/30 rounded-lg p-3 flex items-start">
               <AlertCircle className="w-4 h-4 text-blue-500 mr-2 shrink-0 mt-0.5" />
               <p className="text-[11px] text-blue-700 dark:text-blue-400">
-                提示：抽帧过程将在后台异步进行，完成后您将收到通知。抽帧期间无法进行标注。
+                提示：真实视频解码与抽帧服务尚未接入，当前不会生成视频帧。
               </p>
             </div>
 
@@ -2956,7 +2745,9 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
             config={importModalConfig}
             onClose={() => setImportModalConfig({ open: false })}
             onImport={async (data) => {
-              const newTaskId = `${importModalConfig.type === 'image' ? 'IMG' : 'VID'}-TASK-${Math.floor(Math.random() * 1000)}`;
+              const newTaskId = `${importModalConfig.type === 'image' ? 'IMG' : 'VID'}-TASK-${createLocalId()}`;
+              const dataset = datasets.find(ds => ds.id === data.datasetId && ds.type === importModalConfig.type);
+              if (!dataset) { showAlert('创建失败', '请选择匹配类型的数据集'); return; }
               
               // Load any persistent source files uploaded during dataset creation
               let loadedFiles: any[] = [];
@@ -2967,7 +2758,8 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
               }
 
               // File count calculation
-              const computedFileCount = loadedFiles.length > 0 ? loadedFiles.length : (data.fileCount || 5);
+              if (!loadedFiles.length) { showAlert('原始文件缺失', '请新建数据集并上传真实原文件后再创建标注任务。'); return; }
+              const computedFileCount = loadedFiles.length;
 
               const newTask = {
                 id: newTaskId,
@@ -2979,71 +2771,34 @@ export default function DataAnnotation({ activeSubTab }: DataAnnotationProps) {
                 time: new Date().toISOString().split('T')[0] + ' ' + new Date().toTimeString().split(' ')[0].slice(0, 5)
               };
               
-              if (importModalConfig.type === 'image') {
-                setImageTasks([newTask, ...imageTasks]);
-                if (loadedFiles.length > 0) {
-                  const generatedImageFiles = loadedFiles.map((f: any, idx: number) => {
-                    const fileId = Date.now() + idx + Math.floor(Math.random() * 1000);
-                    if (f.url) {
-                      saveIndexedDBFile(`file_url_${fileId}`, f.url);
-                    }
-                    return {
-                      id: fileId,
-                      taskId: newTaskId,
-                      name: f.name,
-                      status: 'pending',
-                      url: f.url
-                    };
-                  });
-                  setImageFiles((prev: any) => [...prev, ...generatedImageFiles]);
+              try {
+                const generatedFiles = await Promise.all(loadedFiles.map(async (file: any) => {
+                  if (typeof file.url !== 'string' || !/^(data:|blob:)/.test(file.url)) throw new Error('数据集原始文件缺失，请重新上传');
+                  const response = await fetch(file.url);
+                  if (!response.ok) throw new Error('无法读取原始文件');
+                  const blob = await response.blob();
+                  if (importModalConfig.type === 'image') return persistUploadedImage(new File([blob], file.name, { type: blob.type }), newTaskId);
+                  const id = createLocalId();
+                  await saveIndexedDBFile(`file_url_${id}`, blob);
+                  return { id, taskId: newTaskId, name: file.name, status: 'pending', extractStatus: 'pending', strategy: null, totalFrames: 0, url: URL.createObjectURL(blob) };
+                }));
+                if (importModalConfig.type === 'image') {
+                  setImageTasks(prev => [newTask, ...prev]);
+                  setImageFiles(prev => [...prev, ...generatedFiles]);
                 } else {
-                  const generatedImageFiles = Array.from({ length: computedFileCount }).map((_, idx) => ({
-                    id: Date.now() + idx + Math.floor(Math.random() * 1000),
-                    taskId: newTaskId,
-                    name: `${data.name || 'image'}_${idx + 1}.jpg`,
-                    status: 'pending'
-                  }));
-                  setImageFiles((prev: any) => [...prev, ...generatedImageFiles]);
+                  setVideoTasks(prev => [newTask, ...prev]);
+                  setVideoFiles(prev => [...prev, ...generatedFiles]);
                 }
-              } else {
-                setVideoTasks([newTask, ...videoTasks]);
-                if (loadedFiles.length > 0) {
-                  const generatedVideoFiles = loadedFiles.map((f: any, idx: number) => {
-                    const fileId = Date.now() + idx + Math.floor(Math.random() * 1000);
-                    if (f.url) {
-                      saveIndexedDBFile(`file_url_${fileId}`, f.url);
-                    }
-                    return {
-                      id: fileId,
-                      taskId: newTaskId,
-                      name: f.name,
-                      status: 'pending',
-                      extractStatus: 'pending',
-                      strategy: null,
-                      totalFrames: 0,
-                      url: f.url
-                    };
-                  });
-                  setVideoFiles((prev: any) => [...prev, ...generatedVideoFiles]);
-                } else {
-                  const generatedVideoFiles = Array.from({ length: computedFileCount }).map((_, idx) => ({
-                    id: Date.now() + idx + Math.floor(Math.random() * 1000),
-                    taskId: newTaskId,
-                    name: `${data.name || 'video'}_${idx + 1}.mp4`,
-                    status: 'pending',
-                    extractStatus: 'pending',
-                    strategy: null,
-                    totalFrames: 0
-                  }));
-                  setVideoFiles((prev: any) => [...prev, ...generatedVideoFiles]);
-                }
+              } catch (error) {
+                showAlert('任务创建失败', error instanceof Error ? error.message : '原始文件无法读取或保存');
+                return;
               }
 
               // Link task to dataset
               if (data.datasetId) {
                 setDatasets(prev => prev.map(ds => 
                   ds.id === data.datasetId 
-                    ? { ...ds, taskIds: [...ds.taskIds, newTaskId], dataCount: computedFileCount } 
+                    ? { ...ds, taskIds: [...new Set([...ds.taskIds, newTaskId])], dataCount: computedFileCount }
                     : ds
                 ));
               }

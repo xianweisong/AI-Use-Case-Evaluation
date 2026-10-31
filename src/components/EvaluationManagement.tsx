@@ -1,4 +1,8 @@
 import React, { useState } from 'react';
+import { useNavigationReset } from '../lib/useNavigationReset';
+import { createTaskInput, compareSampleResponses, parseTaskConfig } from '../lib/taskConfig';
+import { runLocalEvaluation, readLocalArray, saveLocalArray } from '../lib/localEvaluation';
+import { exportLocalReports } from '../lib/reportExport';
 import { 
   Search, 
   Filter, 
@@ -56,11 +60,12 @@ type ViewType = 'list' | 'taskDetail' | 'reportDetail' | 'versionDiff';
 
 export default function EvaluationManagement({ activeSubTab }: EvaluationManagementProps) {
   const [view, setView] = useState<ViewType>('list');
+  useNavigationReset(() => setView('list'));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [taskModalConfig, setTaskModalConfig] = useState<{ open: boolean; task?: any; initialType?: string }>({ open: false });
   const [reportModalOpen, setReportModalOpen] = useState(false);
   const [generatingReport, setGeneratingReport] = useState(false);
-  const [versionDiffConfig, setVersionDiffConfig] = useState({ base: 'v1.2.0', target: 'v1.3.0' });
+  const [versionDiffConfig, setVersionDiffConfig] = useState({ base: '', target: '' });
   
   // Filter States
   const [taskSearch, setTaskSearch] = useState('');
@@ -81,21 +86,24 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   };
 
   // Task State
-  const [tasks, setTasks] = useState([
+  const [tasks, setTasks] = useState<any[]>(() => readLocalArray('platform-tasks-v1', [
     { id: 'TASK-001', name: '人脸识别精度测试', type: 'UI测试', target: 'FaceSDK-v2.1', status: 'completed', time: getRelativeDate(0, 2, 30), user: '张警官' },
     { id: 'TASK-002', name: '车辆识别接口压力测试', type: '接口测试', target: 'VehicleAPI-v1.0', status: 'running', time: getRelativeDate(0, 1, 15), user: '李警官' },
     { id: 'TASK-003', name: '视频流并发处理评测', type: '性能测试', target: 'StreamServer-v3', status: 'failed', time: getRelativeDate(0, 3, 45), user: '王警官' },
     { id: 'TASK-004', name: '移动端UI兼容性测试', type: 'UI测试', target: 'MobileApp-v1.2', status: 'pending', time: getRelativeDate(0, 0, 15), user: '赵警官' },
-  ]);
+  ].map(t => ({ ...t, name: `示例：${t.name}`, status: 'pending', config: '{}' }))));
 
-  const [reports, setReports] = useState([
+  const [reports, setReports] = useState<any[]>(() => readLocalArray('platform-reports-v1', [
     { id: 'REP-001', name: '人脸识别精度测试', type: 'UI测试', result: '通过', time: getRelativeDate(0, 2, 45) },
     { id: 'REP-002', name: '车辆识别接口压力测试', type: '接口测试', result: '部分失败', time: getRelativeDate(0, 1, 30) },
     { id: 'REP-003', name: '视频流并发处理评测', type: '性能测试', result: '失败', time: getRelativeDate(0, 3, 0) },
     { id: 'REP-004', name: '仪表盘组件渲染测试', type: 'UI测试', result: '通过', time: getRelativeDate(0, 0, 45) },
     { id: 'REP-005', name: '车辆轨迹查询API', type: '接口测试', result: '失败', time: getRelativeDate(0, 1, 15) },
     { id: 'REP-006', name: '数据库写入性能评测', type: '性能测试', result: '通过', time: getRelativeDate(0, 4, 30) },
-  ]);
+  ].map(r => ({ ...r, name: `示例：${r.name}` }))));
+
+  React.useEffect(() => { try { saveLocalArray('platform-tasks-v1', tasks); } catch { alert('任务保存失败：浏览器存储空间不足'); } }, [tasks]);
+  React.useEffect(() => { try { saveLocalArray('platform-reports-v1', reports); } catch { alert('报告保存失败：浏览器存储空间不足'); } }, [reports]);
 
   const filteredTasks = React.useMemo(() => {
     return tasks.filter(task => {
@@ -120,7 +128,24 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   // Reset view when sub-tab changes
   React.useEffect(() => {
     setView('list');
+    const selected = sessionStorage.getItem('platform-selected-task');
+    if (selected) {
+      sessionStorage.removeItem('platform-selected-task');
+      setSelectedId(selected);
+      setView('taskDetail');
+    }
+    const search = sessionStorage.getItem('platform-task-search');
+    if (search) { setTaskSearch(search); sessionStorage.removeItem('platform-task-search'); }
   }, [activeSubTab]);
+
+  React.useEffect(() => {
+    const open = () => {
+      const id = sessionStorage.getItem('platform-selected-task');
+      if (id) { sessionStorage.removeItem('platform-selected-task'); setSelectedId(id); setView('taskDetail'); }
+    };
+    window.addEventListener('platform-open-task', open);
+    return () => window.removeEventListener('platform-open-task', open);
+  }, []);
 
   const getStatusLabel = (status: string) => {
     switch (status) {
@@ -142,12 +167,21 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   };
 
   const handleRunTask = (id: string) => {
-    setTasks(prev => prev.map(t => {
-      if (t.id === id) {
-        return { ...t, status: t.status === 'running' ? 'completed' : 'running' };
-      }
-      return t;
-    }));
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    try {
+      const run = runLocalEvaluation(task);
+      const report = { id: `REP-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`, taskId: id, taskRevision: task.revision || 1, taskSnapshot: {type:task.type,target:task.target,config:task.config}, name: '本地样例：' + task.name.replace(/^示例：/, ''), type: task.type, result: run.failed ? '失败' : '通过', time: new Date().toLocaleString(), run };
+      setReports(prev => [report, ...prev]);
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, status: run.failed ? 'failed' : 'completed', progress: 100, run } : t));
+    } catch (e) { alert(e instanceof Error ? e.message : '本地样例执行失败'); }
+  };
+
+  const viewTaskReport = (id: string) => {
+    const task = tasks.find(t => t.id === id);
+    const report = reports.find(r => r.taskId === id && (r.taskRevision || 1) === (task?.revision || 1));
+    if (!report) { alert('请先执行本地样例任务'); return; }
+    setSelectedId(report.id); setView('reportDetail');
   };
 
   const handleDeleteTask = (id: string) => {
@@ -162,7 +196,11 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   };
 
   const handleUpdateTask = (updatedTask: any) => {
-    setTasks(prev => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
+    setTasks(prev => prev.map(t => {
+      if (t.id !== updatedTask.id) return t;
+      const changed = ['type', 'target', 'config'].some(key => t[key] !== updatedTask[key]);
+      return changed ? { ...updatedTask, revision: (t.revision || 1) + 1, status: 'pending', progress: 0, run: undefined } : updatedTask;
+    }));
     setTaskModalConfig({ open: false });
   };
 
@@ -188,12 +226,10 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
     ];
 
     const handleGenerate = () => {
-      setGeneratingReport(true);
-      setTimeout(() => {
-        setGeneratingReport(false);
-        alert('报告生成成功！');
+      try {
+        exportLocalReports(reports.filter(r => r.run), exportFormat, content, template);
         onClose();
-      }, 1500);
+      } catch (e) { alert(e instanceof Error ? e.message : '报告导出失败'); }
     };
 
     return (
@@ -331,18 +367,22 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
 
     const handleSubmit = (e: React.FormEvent) => {
       e.preventDefault();
+      let validated;
+      try {
+        validated = createTaskInput(formData);
+      } catch (error) {
+        alert(error instanceof Error ? error.message : '测试配置无效');
+        return;
+      }
       if (isEdit) {
         onUpdate({
           ...config.task,
-          ...formData,
-          time: new Date().toLocaleString(),
+          ...validated,
         });
       } else {
         const newTask = {
-          id: `TASK-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`,
-          name: formData.name,
-          type: formData.type,
-          target: formData.target,
+          id: `TASK-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          ...validated,
           status: 'pending',
           time: new Date().toLocaleString(),
           user: '当前用户'
@@ -439,7 +479,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
       <div>
         <h2 className="text-2xl font-bold text-[var(--text-primary)]">{title}</h2>
-        <p className="text-sm text-[var(--text-secondary)] mt-1">评测管理 / {title}</p>
+        <p className="text-sm text-[var(--text-secondary)] mt-1">评测管理 / {title} · 浏览器本地样例模式</p>
       </div>
       {onAdd && (
         <button 
@@ -689,20 +729,17 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--border-color)]">
-            {[
-              { id: 'REP-001', name: '登录页面自动化测试', page: '/login', status: 'completed', time: '2026-03-01 10:00' },
-              { id: 'REP-004', name: '仪表盘组件渲染测试', page: '/dashboard', status: 'running', time: '2026-03-01 11:30' },
-            ].map((test, i) => (
+            {tasks.filter(t => t.type === 'UI测试').map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                 <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.page}</td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.target}（隔离样例）</td>
                 <td className="px-6 py-4"><StatusBadge status={test.status} /></td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{test.time}</td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
-                    <button className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
+                    <button onClick={() => handleRunTask(test.id)} className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
                     <button 
-                      onClick={() => { setSelectedId(test.id); setView('reportDetail'); }}
+                      onClick={() => viewTaskReport(test.id)}
                       className="text-xs font-medium text-slate-500 hover:text-slate-600"
                     >
                       查看结果
@@ -722,7 +759,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h2 className="text-2xl font-bold text-[var(--text-primary)]">接口测试</h2>
-          <p className="text-sm text-[var(--text-secondary)] mt-1">评测管理 / 接口测试</p>
+          <p className="text-sm text-[var(--text-secondary)] mt-1">评测管理 / 接口测试 · 仅校验本地样例，不发送网络请求</p>
         </div>
         <div className="flex items-center space-x-3">
           <button 
@@ -751,27 +788,24 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--border-color)]">
-            {[
-              { id: 'REP-002', name: '人脸特征提取API', url: '/api/v1/face/extract', method: 'POST', status: 'completed' },
-              { id: 'REP-005', name: '车辆轨迹查询API', url: '/api/v1/vehicle/track', method: 'GET', status: 'failed' },
-            ].map((test, i) => (
+            {tasks.filter(t => t.type === '接口测试').map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                 <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.url}</td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.target}</td>
                 <td className="px-6 py-4">
                   <span className={cn(
                     "text-[10px] px-1.5 py-0.5 rounded font-bold",
                     test.method === 'POST' ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
                   )}>
-                    {test.method}
+                    本地
                   </span>
                 </td>
                 <td className="px-6 py-4"><StatusBadge status={test.status} /></td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
-                    <button className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
+                    <button onClick={() => handleRunTask(test.id)} className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
                     <button 
-                      onClick={() => { setSelectedId(test.id); setView('reportDetail'); }}
+                      onClick={() => viewTaskReport(test.id)}
                       className="text-xs font-medium text-slate-500 hover:text-slate-600"
                     >
                       查看结果
@@ -787,12 +821,14 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
   );
 
   const renderVersionDiff = () => {
-    const diffData = [
-      { path: '/api/v1/user/profile', method: 'GET', type: 'modified', impact: 'low', description: '新增 optional 字段: bio' },
-      { path: '/api/v1/auth/logout', method: 'POST', type: 'added', impact: 'none', description: '新增登出接口' },
-      { path: '/api/v1/data/export', method: 'POST', type: 'deleted', impact: 'breaking', description: '接口已移除，请使用 /api/v2/export' },
-      { path: '/api/v1/face/verify', method: 'POST', type: 'modified', impact: 'breaking', description: '参数 face_id 变更为必填' },
-    ];
+    const candidates = tasks.filter(t => t.type === '接口测试');
+    const base = candidates.find(t => t.id === versionDiffConfig.base);
+    const target = candidates.find(t => t.id === versionDiffConfig.target);
+    const sample = (task: any) => { try { return parseTaskConfig(task.config || '{}').sampleResponse ?? {status: 'OK', data: {faces: []}}; } catch { return null; } };
+    let diffData: ReturnType<typeof compareSampleResponses> = [];
+    let diffError = '';
+    try { if (base && target) diffData = compareSampleResponses(sample(base), sample(target)); }
+    catch (error) { diffError = error instanceof Error ? error.message : '样例无法比较'; }
 
     return (
       <div className="space-y-6">
@@ -808,7 +844,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         {/* Version Config Card */}
         <div className="card p-6">
           <h3 className="text-lg font-bold mb-6 flex items-center">
-            <GitCompare className="w-5 h-5 mr-2 text-blue-500" /> 版本对比配置
+            <GitCompare className="w-5 h-5 mr-2 text-blue-500" /> 版本对比配置（本地响应样例）
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
             <div className="space-y-4">
@@ -820,8 +856,8 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                     onChange={(e) => setVersionDiffConfig({...versionDiffConfig, base: e.target.value})}
                     className="bg-transparent font-bold text-[var(--text-primary)] outline-none cursor-pointer"
                   >
-                    <option value="v1.1.0">v1.1.0</option>
-                    <option value="v1.2.0">v1.2.0</option>
+                    <option value="">请选择基准任务</option>
+                    {candidates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </div>
                 <div className="w-10 h-10 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
@@ -841,8 +877,8 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                     onChange={(e) => setVersionDiffConfig({...versionDiffConfig, target: e.target.value})}
                     className="bg-transparent font-bold text-[var(--text-primary)] outline-none cursor-pointer"
                   >
-                    <option value="v1.3.0">v1.3.0</option>
-                    <option value="v1.4.0-beta">v1.4.0-beta</option>
+                    <option value="">请选择对比任务</option>
+                    {candidates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </div>
                 <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
@@ -856,7 +892,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         {/* Interface Change Detection */}
         <div className="card overflow-hidden">
           <div className="px-6 py-4 border-b border-[var(--border-color)] flex items-center justify-between">
-            <h4 className="text-sm font-semibold">接口变更检测</h4>
+            <h4 className="text-sm font-semibold">{diffError || (base && target ? `响应样例差异：${diffData.length} 项` : '请先选择两个接口测试任务')}</h4>
             <div className="flex gap-4">
               <span className="text-xs flex items-center"><div className="w-2 h-2 rounded-full bg-blue-500 mr-1.5" /> 修改</span>
               <span className="text-xs flex items-center"><div className="w-2 h-2 rounded-full bg-emerald-500 mr-1.5" /> 新增</span>
@@ -903,7 +939,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                         item.impact === 'breaking' ? "text-red-600" :
                         item.impact === 'low' ? "text-orange-600" : "text-slate-600"
                       )}>
-                        {item.impact === 'breaking' ? '破坏性变更' : item.impact === 'low' ? '低风险' : '无影响'}
+                        {item.impact === 'breaking' ? '字段缺失' : item.impact === 'low' ? '内容变化' : '新增字段'}
                       </span>
                     </div>
                   </td>
@@ -917,19 +953,19 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         {/* Compatibility Analysis Summary */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="card p-6 border-l-4 border-red-500">
-            <h4 className="text-sm font-semibold mb-2">破坏性变更</h4>
-            <p className="text-3xl font-bold text-red-500">2</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-1">需要立即更新客户端代码</p>
+            <h4 className="text-sm font-semibold mb-2">移除字段</h4>
+            <p className="text-3xl font-bold text-red-500">{diffData.filter(d => d.type === 'deleted').length}</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-1">目标样例中不再包含的字段</p>
           </div>
           <div className="card p-6 border-l-4 border-orange-500">
-            <h4 className="text-sm font-semibold mb-2">向后兼容变更</h4>
-            <p className="text-3xl font-bold text-orange-500">1</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-1">建议在下个版本适配</p>
+            <h4 className="text-sm font-semibold mb-2">内容变化</h4>
+            <p className="text-3xl font-bold text-orange-500">{diffData.filter(d => d.type === 'modified').length}</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-1">字段值或类型发生变化</p>
           </div>
           <div className="card p-6 border-l-4 border-emerald-500">
-            <h4 className="text-sm font-semibold mb-2">新增功能</h4>
-            <p className="text-3xl font-bold text-emerald-500">1</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-1">可供新业务使用</p>
+            <h4 className="text-sm font-semibold mb-2">新增字段</h4>
+            <p className="text-3xl font-bold text-emerald-500">{diffData.filter(d => d.type === 'added').length}</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-1">目标样例中新出现的字段</p>
           </div>
         </div>
 
@@ -940,22 +976,21 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
           </h4>
           <div className="space-y-4">
             <div className="p-4 bg-red-50 dark:bg-red-900/10 rounded-lg border border-red-100 dark:border-red-900/20">
-              <p className="text-sm font-bold text-red-700 dark:text-red-400 mb-1">建议 1: 接口迁移</p>
+              <p className="text-sm font-bold text-red-700 dark:text-red-400 mb-1">建议 1: 字段检查</p>
               <p className="text-xs text-red-600 dark:text-red-300/80">
-                由于 /api/v1/data/export 已被删除，建议所有客户端在 2026-06-01 前迁移至 /api/v2/export。
-                v2 接口提供了更高的性能和更多的导出格式支持。
+                根据上表检查字段缺失项，确认客户端是否依赖这些字段。
               </p>
             </div>
             <div className="p-4 bg-orange-50 dark:bg-orange-900/10 rounded-lg border border-orange-100 dark:border-orange-900/20">
               <p className="text-sm font-bold text-orange-700 dark:text-orange-400 mb-1">建议 2: 参数适配</p>
               <p className="text-xs text-orange-600 dark:text-orange-300/80">
-                /api/v1/face/verify 的 face_id 参数现在是必填项。请检查客户端调用逻辑，确保在发送请求前已获取有效的 face_id。
+                响应样例由任务 JSON 配置中的 sampleResponse 提供，修改配置后重新选择任务即可比较。
               </p>
             </div>
             <div className="p-4 bg-blue-50 dark:bg-blue-900/10 rounded-lg border border-blue-100 dark:border-blue-900/20">
-              <p className="text-sm font-bold text-blue-700 dark:text-blue-400 mb-1">建议 3: 新功能试用</p>
+              <p className="text-sm font-bold text-blue-700 dark:text-blue-400 mb-1">建议 3: 后续联调</p>
               <p className="text-xs text-blue-600 dark:text-blue-300/80">
-                新版本引入了 /api/v1/auth/logout 接口，建议客户端集成该接口以提升安全性，确保用户会话能被正确销毁。
+                当前为离线数据差异检查，实际接口兼容性仍需接入目标系统后执行。
               </p>
             </div>
           </div>
@@ -979,20 +1014,17 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--border-color)]">
-            {[
-              { id: 'REP-003', name: '高并发视频流接入测试', target: 'StreamGateway-v2', concurrency: 500, status: 'completed' },
-              { id: 'REP-006', name: '数据库写入性能评测', target: 'PostgreSQL-Cluster', concurrency: 1000, status: 'running' },
-            ].map((test, i) => (
+            {tasks.filter(t => t.type === '性能测试').map((test, i) => (
               <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                 <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{test.name}</td>
                 <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{test.target}</td>
-                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">{test.concurrency}</td>
+                <td className="px-6 py-4 text-sm text-[var(--text-secondary)] font-mono">本地单线程</td>
                 <td className="px-6 py-4"><StatusBadge status={test.status} /></td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end space-x-3">
-                    <button className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
+                    <button onClick={() => handleRunTask(test.id)} className="text-xs font-medium text-blue-500 hover:text-blue-600">执行</button>
                     <button 
-                      onClick={() => { setSelectedId(test.id); setView('reportDetail'); }}
+                      onClick={() => viewTaskReport(test.id)}
                       className="text-xs font-medium text-slate-500 hover:text-slate-600"
                     >
                       查看结果
@@ -1007,7 +1039,10 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
     </>
   );
 
-  const renderTaskDetail = () => (
+  const renderTaskDetail = () => {
+    const task = tasks.find(t => t.id === selectedId);
+    if (!task) return <div className="card p-6">该任务不存在或已被删除</div>;
+    return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <button 
@@ -1029,27 +1064,27 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">任务名称</p>
-                <p className="text-sm font-medium text-[var(--text-primary)]">人脸识别精度测试 (TASK-001)</p>
+                <p className="text-sm font-medium text-[var(--text-primary)]">{task.name} ({task.id})</p>
               </div>
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">测试类型</p>
                 <div className="flex items-center">
                   <LayoutIcon className="w-3.5 h-3.5 mr-1.5 text-blue-500" />
-                  <p className="text-sm font-medium text-[var(--text-primary)]">UI测试</p>
+                  <p className="text-sm font-medium text-[var(--text-primary)]">{task.type}</p>
                 </div>
               </div>
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">创建时间</p>
                 <div className="flex items-center">
                   <Calendar className="w-3.5 h-3.5 mr-1.5 text-slate-400" />
-                  <p className="text-sm font-medium text-[var(--text-primary)]">{getRelativeDate(0, 1, 0)}</p>
+                  <p className="text-sm font-medium text-[var(--text-primary)]">{task.time}</p>
                 </div>
               </div>
               <div className="space-y-1">
                 <p className="text-xs text-[var(--text-secondary)]">创建人</p>
                 <div className="flex items-center">
                   <User className="w-3.5 h-3.5 mr-1.5 text-slate-400" />
-                  <p className="text-sm font-medium text-[var(--text-primary)]">张警官</p>
+                  <p className="text-sm font-medium text-[var(--text-primary)]">{task.user}</p>
                 </div>
               </div>
             </div>
@@ -1064,12 +1099,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
               <div>
                 <p className="text-xs text-[var(--text-secondary)] mb-2">运行参数</p>
                 <div className="bg-[var(--bg-primary)] p-4 rounded-lg font-mono text-xs text-[var(--text-primary)] border border-[var(--border-color)]">
-                  {`{
-  "threshold": 0.85,
-  "max_iterations": 1000,
-  "retry_on_failure": true,
-  "log_level": "DEBUG"
-}`}
+                  {task.config || '{}'}
                 </div>
               </div>
               <div>
@@ -1077,8 +1107,8 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
                 <div className="flex items-center p-3 border border-[var(--border-color)] rounded-lg bg-[var(--bg-primary)]">
                   <Database className="w-5 h-5 text-blue-500 mr-3" />
                   <div>
-                    <p className="text-sm font-medium">Standard_Face_Dataset_2026.zip</p>
-                    <p className="text-xs text-[var(--text-secondary)]">大小: 1.2GB | 包含 50,000 张样本</p>
+                    <p className="text-sm font-medium">{task.dataset?.name || '待补充'}</p>
+                    <p className="text-xs text-[var(--text-secondary)]">{task.dataset?.description || '待补充'}</p>
                   </div>
                 </div>
               </div>
@@ -1095,20 +1125,25 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-[var(--text-secondary)]">当前状态</span>
-                <StatusBadge status="completed" />
+                <StatusBadge status={task.status} />
               </div>
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
                   <span className="text-[var(--text-secondary)]">执行进度</span>
-                  <span className="font-medium text-blue-500">100%</span>
+                  <span className="font-medium text-blue-500">{task.progress ?? (task.status === 'completed' ? 100 : 0)}%</span>
                 </div>
                 <div className="h-2 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500 w-full" />
+                  <div className="h-full bg-blue-500 w-full" style={{ width: `${task.progress ?? (task.status === 'completed' ? 100 : 0)}%` }} />
                 </div>
               </div>
               <div className="pt-4 border-t border-[var(--border-color)]">
                 <button 
-                  onClick={() => setView('reportDetail')}
+                  onClick={() => {
+                    const report = reports.find((r: any) => r.taskId === task.id && (r.taskRevision || 1) === (task.revision || 1));
+                    if (!report) { alert('该任务尚无关联测试报告'); return; }
+                    setSelectedId(report.id);
+                    setView('reportDetail');
+                  }}
                   className="w-full py-2 bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors flex items-center justify-center"
                 >
                   <BarChart3 className="w-4 h-4 mr-2" /> 查看测试报告
@@ -1122,8 +1157,8 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             <div className="flex items-center p-3 bg-[var(--bg-primary)] rounded-lg">
               <Zap className="w-4 h-4 text-orange-500 mr-3" />
               <div>
-                <p className="text-xs font-medium">GPU-Node-04</p>
-                <p className="text-[10px] text-[var(--text-secondary)]">负载: 42% | 温度: 65°C</p>
+                <p className="text-xs font-medium">{task.node || '待补充'}</p>
+                <p className="text-[10px] text-[var(--text-secondary)]">{task.nodeMetrics || '待补充'}</p>
               </div>
             </div>
           </div>
@@ -1132,13 +1167,20 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
     </div>
   );
 
+  };
+
   const renderReportDetail = () => {
-    const report = reports.find(r => r.id === selectedId) || reports[0];
+    const report = reports.find(r => r.id === selectedId);
+    if (!report) return <div className="card p-6">该报告不存在或尚未生成</div>;
     const type = report.type;
+    const run = report.run;
+    const successRate = run ? Math.round(run.passed / Math.max(1, run.checks.length) * 100) : 92;
+    const failureRate = 100 - successRate;
+    const averageMs = run ? (run.durationMs / Math.max(1, run.checks.length)).toFixed(2) : '142';
 
     const pieData = [
-      { name: '成功', value: 92, color: '#10b981' },
-      { name: '失败', value: 8, color: '#ef4444' },
+      { name: '成功', value: successRate, color: '#10b981' },
+      { name: '失败', value: failureRate, color: '#ef4444' },
     ];
 
     const getTrendTimes = () => {
@@ -1153,7 +1195,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
 
     const trendTimes = getTrendTimes();
 
-    const trendData = [
+    const trendData = run ? run.checks.map((c: any, i: number) => ({ time: String(i + 1), timeCost: parseFloat(c.cost), successRate: c.result === 'success' ? 100 : 0 })) : [
       { time: trendTimes[0], timeCost: 120, successRate: 85 },
       { time: trendTimes[1], timeCost: 132, successRate: 88 },
       { time: trendTimes[2], timeCost: 101, successRate: 92 },
@@ -1167,10 +1209,10 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
       <div className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label: '页面加载耗时', value: '1.2s', status: 'success' },
-            { label: '首屏渲染耗时', value: '0.8s', status: 'success' },
-            { label: '交互响应耗时', value: '120ms', status: 'success' },
-            { label: '资源错误数', value: '0', status: 'success' },
+            { label: '页面加载耗时', value: run ? '待接入' : '1.2s', status: 'success' },
+            { label: '首屏渲染耗时', value: run ? '待接入' : '0.8s', status: 'success' },
+            { label: '交互响应耗时', value: run ? '待接入' : '120ms', status: 'success' },
+            { label: '资源错误数', value: run ? '待接入' : '0', status: 'success' },
           ].map((item, i) => (
             <div key={i} className="card p-4">
               <p className="text-xs text-[var(--text-secondary)] mb-1">{item.label}</p>
@@ -1184,7 +1226,7 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             {['Chrome 120', 'Safari 17', 'Firefox 121', 'Edge 120'].map((browser, i) => (
               <div key={i} className="flex items-center justify-between p-3 bg-[var(--bg-primary)] rounded-lg">
                 <span className="text-sm">{browser}</span>
-                <span className="text-xs text-emerald-500 font-medium">100% 匹配</span>
+                <span className="text-xs text-emerald-500 font-medium">{run ? '未运行跨浏览器测试' : '100% 匹配（示例）'}</span>
               </div>
             ))}
           </div>
@@ -1205,11 +1247,11 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-color)]">
-              {[
+              {(run ? run.checks.map((c: any) => ({path: c.item, code: '本地样例', time: c.cost, result: c.result === 'success' ? 'PASS' : 'FAIL'})) : [
                 { path: '/api/v1/user/profile', code: 200, time: '45ms', result: 'PASS' },
                 { path: '/api/v1/auth/login', code: 200, time: '120ms', result: 'PASS' },
                 { path: '/api/v1/data/sync', code: 500, time: '2100ms', result: 'FAIL' },
-              ].map((row, i) => (
+              ]).map((row, i) => (
                 <tr key={i} className="text-sm">
                   <td className="px-6 py-3 font-mono">{row.path}</td>
                   <td className="px-6 py-3">{row.code}</td>
@@ -1235,18 +1277,18 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="card p-6">
             <h4 className="text-sm font-semibold mb-4">吞吐量 (TPS)</h4>
-            <p className="text-3xl font-bold text-blue-500">1,240</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-2">峰值: 1,580 TPS</p>
+            <p className="text-3xl font-bold text-blue-500">{run ? '待接入' : '1,240'}</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">{run ? '本地样例不采集服务端吞吐量' : '峰值: 1,580 TPS（示例）'}</p>
           </div>
           <div className="card p-6">
             <h4 className="text-sm font-semibold mb-4">并发用户数</h4>
-            <p className="text-3xl font-bold text-orange-500">500</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-2">稳定运行时间: 2h 15m</p>
+            <p className="text-3xl font-bold text-orange-500">{run ? '待接入' : '500'}</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">{run ? `本地样例耗时: ${run.durationMs.toFixed(2)}ms` : '稳定运行时间: 2h 15m（示例）'}</p>
           </div>
           <div className="card p-6">
             <h4 className="text-sm font-semibold mb-4">错误率</h4>
-            <p className="text-3xl font-bold text-red-500">0.05%</p>
-            <p className="text-xs text-[var(--text-secondary)] mt-2">超时请求: 12个</p>
+            <p className="text-3xl font-bold text-red-500">{run ? failureRate : 0.05}%</p>
+            <p className="text-xs text-[var(--text-secondary)] mt-2">{run ? `本地断言失败: ${run.failed}项` : '超时请求: 12个（示例）'}</p>
           </div>
         </div>
       </div>
@@ -1282,15 +1324,15 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
             </div>
             <div className="flex gap-8">
               <div className="text-center">
-                <p className="text-2xl font-bold text-emerald-500">92%</p>
+                <p className="text-2xl font-bold text-emerald-500">{successRate}%</p>
                 <p className="text-xs text-[var(--text-secondary)]">成功率</p>
               </div>
               <div className="text-center">
-                <p className="text-2xl font-bold text-red-500">8%</p>
+                <p className="text-2xl font-bold text-red-500">{failureRate}%</p>
                 <p className="text-xs text-[var(--text-secondary)]">失败率</p>
               </div>
               <div className="text-center">
-                <p className="text-2xl font-bold text-blue-500">142ms</p>
+                <p className="text-2xl font-bold text-blue-500">{averageMs}ms</p>
                 <p className="text-xs text-[var(--text-secondary)]">平均耗时</p>
               </div>
             </div>
@@ -1373,13 +1415,13 @@ export default function EvaluationManagement({ activeSubTab }: EvaluationManagem
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-color)]">
-              {[
+              {(run?.checks || [
                 { item: '人脸检测 - 正面', result: 'success', cost: '45ms', error: '-' },
                 { item: '人脸检测 - 侧面', result: 'success', cost: '52ms', error: '-' },
                 { item: '特征点提取', result: 'success', cost: '120ms', error: '-' },
                 { item: '活体检测', result: 'failed', cost: '210ms', error: '光照强度不足' },
                 { item: '人脸比对 (1:1)', result: 'success', cost: '85ms', error: '-' },
-              ].map((row, i) => (
+              ]).map((row, i) => (
                 <tr key={i} className="hover:bg-[var(--bg-primary)] transition-colors">
                   <td className="px-6 py-4 text-sm font-medium text-[var(--text-primary)]">{row.item}</td>
                   <td className="px-6 py-4">

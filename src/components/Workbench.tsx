@@ -1,4 +1,5 @@
 import React from 'react';
+import { readLocalArray } from '../lib/localEvaluation';
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -36,27 +37,12 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-const STATS: SystemStat[] = [
-  { label: '累计评测任务', value: '1,284', trend: 'up', change: '+12%' },
-  { label: '当前运行中', value: '12', trend: 'stable', change: '0' },
-  { label: '标注数据量', value: '85.4', unit: '万', trend: 'up', change: '+5.2%' },
-  { label: '系统健康度', value: '98.5', unit: '%', trend: 'up', change: '+0.1%' },
-];
-
-const getRelativeDate = (daysAgo: number = 0, hoursAgo: number = 0, minsAgo: number = 0) => {
-  const d = new Date();
-  d.setDate(d.getDate() - daysAgo);
-  d.setHours(d.getHours() - hoursAgo);
-  d.setMinutes(d.getMinutes() - minsAgo);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-};
-
-const RECENT_TASKS: Task[] = [
-  { id: 'T-1024', name: '人脸识别算法精度评测', type: '算法评测', status: 'running', progress: 65, creator: '张警官', createTime: getRelativeDate(0, 0, 30) },
-  { id: 'T-1023', name: '车辆特征提取性能测试', type: '性能测试', status: 'completed', progress: 100, creator: '李警官', createTime: getRelativeDate(0, 1, 0) },
-  { id: 'T-1022', name: '视频流接入稳定性校验', type: '接口评测', status: 'failed', progress: 42, creator: '王警官', createTime: getRelativeDate(0, 2, 15) },
-  { id: 'T-1021', name: '语义分割标注任务-03', type: '数据标注', status: 'pending', progress: 0, creator: '赵警官', createTime: getRelativeDate(1, 0, 0) },
-];
+function annotationCount() {
+  try {
+    const value = JSON.parse(localStorage.getItem('as-eval-annotations') || '{}');
+    return value && typeof value === 'object' ? Object.values(value).reduce<number>((n, rows) => n + (Array.isArray(rows) ? rows.length : 0), 0) : 0;
+  } catch { return 0; }
+}
 
 const getResourceData = () => {
   const data = [];
@@ -65,9 +51,9 @@ const getResourceData = () => {
     d.setHours(d.getHours() - i * 4);
     data.push({
       time: `${String(d.getHours()).padStart(2, '0')}:00`,
-      cpu: Math.floor(Math.random() * 50) + 30,
-      memory: Math.floor(Math.random() * 40) + 40,
-      gpu: Math.floor(Math.random() * 60) + 20,
+      cpu: 30 + (i * 7) % 50,
+      memory: 40 + (i * 5) % 40,
+      gpu: 20 + (i * 11) % 60,
     });
   }
   return data;
@@ -87,6 +73,21 @@ interface WorkbenchProps {
 }
 
 export default function Workbench({ navigate }: WorkbenchProps) {
+  const load = () => readLocalArray<any>('platform-tasks-v1', []);
+  const [localTasks, setLocalTasks] = React.useState(load);
+  React.useEffect(() => {
+    const sync = () => setLocalTasks(load());
+    window.addEventListener('platform-local-data', sync);
+    window.addEventListener('storage', sync);
+    return () => { window.removeEventListener('platform-local-data', sync); window.removeEventListener('storage', sync); };
+  }, []);
+  const RECENT_TASKS: Task[] = localTasks.map(t => ({ id: t.id, name: t.name, type: t.type, status: t.status, progress: t.progress || 0, creator: t.user || '当前用户', createTime: t.time }));
+  const STATS: SystemStat[] = [
+    { label: '累计评测任务', value: String(localTasks.length), trend: 'stable', change: '' },
+    { label: '当前运行中', value: String(localTasks.filter(t => t.status === 'running').length), trend: 'stable', change: '' },
+    { label: '标注数据量', value: String(annotationCount()), trend: 'stable', change: '' },
+    { label: '系统健康度', value: '未接入', trend: 'stable', change: '' },
+  ];
   const [searchQuery, setSearchQuery] = React.useState('');
   const [typeFilter, setTypeFilter] = React.useState('all');
   const [statusFilter, setStatusFilter] = React.useState('all');
@@ -102,11 +103,11 @@ export default function Workbench({ navigate }: WorkbenchProps) {
       
       return matchesSearch && matchesType && matchesStatus && matchesCreator;
     });
-  }, [searchQuery, typeFilter, statusFilter, creatorFilter]);
+  }, [searchQuery, typeFilter, statusFilter, creatorFilter, localTasks]);
 
   const taskTypes = React.useMemo(() => {
     return Array.from(new Set(RECENT_TASKS.map(t => t.type)));
-  }, []);
+  }, [localTasks]);
 
   return (
     <div className="space-y-6">
@@ -138,7 +139,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
         {/* Resource Usage Chart */}
         <div className="card p-6 lg:col-span-2">
           <div className="flex items-center justify-between mb-6">
-            <h3 className="font-semibold text-[var(--text-primary)]">资源使用情况</h3>
+            <h3 className="font-semibold text-[var(--text-primary)]">资源使用情况（示例）</h3>
             <div className="flex items-center space-x-4 text-xs">
               <div className="flex items-center"><span className="w-2 h-2 rounded-full bg-blue-500 mr-1.5" /> CPU</div>
               <div className="flex items-center"><span className="w-2 h-2 rounded-full bg-emerald-500 mr-1.5" /> 内存</div>
@@ -214,7 +215,7 @@ export default function Workbench({ navigate }: WorkbenchProps) {
                   </div>
                   <div className="flex items-center">
                     <div className={`w-2 h-2 rounded-full mr-2 ${s.status === 'normal' ? 'bg-emerald-500' : 'bg-orange-500'}`} />
-                    <span className="text-xs text-[var(--text-secondary)]">{s.status === 'normal' ? '运行正常' : '负载较高'}</span>
+                    <span className="text-xs text-[var(--text-secondary)]">{s.status === 'normal' ? '未接入' : '未接入'}</span>
                   </div>
                 </div>
               ))}
@@ -348,10 +349,8 @@ export default function Workbench({ navigate }: WorkbenchProps) {
                   <td className="px-6 py-4">
                     <button 
                       onClick={() => {
-                        if (task.id === 'T-1024') navigate('evaluation', 'task-mgmt');
-                        if (task.id === 'T-1023') navigate('resource', 'perf-stats');
-                        if (task.id === 'T-1022') navigate('interface', 'api-compat');
-                        if (task.id === 'T-1021') navigate('annotation', 'img-anno');
+                        sessionStorage.setItem('platform-selected-task', task.id);
+                        navigate('evaluation', 'task-mgmt');
                       }}
                       className="text-blue-500 hover:text-blue-600 text-xs font-medium"
                     >
